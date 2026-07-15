@@ -11,12 +11,11 @@ Es nutzt die REST API v1 für ausgehende Nachrichten und das DDP WebSocket für 
 hermes plugins install meron1122/hermes-plugin-rocketchat
 ```
 
-Der Installer klont dieses Repo nach `~/.hermes/plugins/hermes-plugin-rocketchat/` und fragt, ob das Plugin aktiviert werden soll. Alternativ manuell in `~/.hermes/config.yaml`:
+Der Installer klont dieses Repo nach `~/.hermes/plugins/rocketchat-platform/` und fragt, ob das Plugin aktiviert werden soll. Alternativ:
 
-```yaml
-plugins:
-  enabled:
-    - hermes-plugin-rocketchat
+```bash
+hermes plugins enable rocketchat-platform
+hermes gateway restart
 ```
 
 ---

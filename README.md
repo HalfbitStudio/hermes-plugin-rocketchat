@@ -10,12 +10,11 @@ Connects Hermes Agent to a self-hosted Rocket.Chat instance via REST API v1 (out
 hermes plugins install meron1122/hermes-plugin-rocketchat
 ```
 
-The installer clones this repo into `~/.hermes/plugins/hermes-plugin-rocketchat/` and prompts you to enable it. If you skipped the prompt, enable it manually in `~/.hermes/config.yaml`:
+The installer clones this repo into `~/.hermes/plugins/rocketchat-platform/` and prompts you to enable it. If you skipped the prompt:
 
-```yaml
-plugins:
-  enabled:
-    - hermes-plugin-rocketchat
+```bash
+hermes plugins enable rocketchat-platform
+hermes gateway restart
 ```
 
 ---
