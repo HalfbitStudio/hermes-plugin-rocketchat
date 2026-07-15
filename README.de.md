@@ -8,7 +8,7 @@ Es nutzt die REST API v1 für ausgehende Nachrichten und das DDP WebSocket für 
 ## Installation
 
 ```bash
-hermes plugins install meron1122/hermes-plugin-rocketchat
+hermes plugins install HalfbitStudio/hermes-plugin-rocketchat
 ```
 
 Der Installer klont dieses Repo nach `~/.hermes/plugins/rocketchat-platform/` und fragt, ob das Plugin aktiviert werden soll. Alternativ:

@@ -7,7 +7,7 @@ Connects Hermes Agent to a self-hosted Rocket.Chat instance via REST API v1 (out
 ## Installation
 
 ```bash
-hermes plugins install meron1122/hermes-plugin-rocketchat
+hermes plugins install HalfbitStudio/hermes-plugin-rocketchat
 ```
 
 The installer clones this repo into `~/.hermes/plugins/rocketchat-platform/` and prompts you to enable it. If you skipped the prompt:
@@ -61,6 +61,69 @@ ROCKETCHAT_ALLOWED_USERS=your_user_id
 systemctl restart hermes-gateway
 # or via Telegram: /restart
 ```
+
+---
+
+## Configuring Rocket.Chat (server side)
+
+Everything the bot needs on the Rocket.Chat side, beyond the Quick Start basics.
+
+### Bot account
+
+Create a dedicated user for the bot (**Admin → Users → New**):
+
+- **Username**: e.g. `hermes-bot` — this is the name users will @mention
+- **Roles**: add `bot` (keeps the bot out of "active users" counts and marks it visually)
+- Uncheck **Require password change** and skip the welcome email
+- Optionally enable **Join default channels** if the bot should sit in your standard rooms
+
+### Personal Access Token
+
+Log in **as the bot user** (not as admin):
+
+1. **My Account → Personal Access Tokens**
+2. Name it (e.g. `hermes-gateway`) and **check ☑ Ignore Two Factor Authentication** — without this, REST calls fail with `totp-required` on 2FA-enforced servers
+3. Copy the **Token** and **User ID** immediately; they are shown only once
+
+If PAT creation is blocked, enable it under **Admin → Settings → Accounts → "Allow Personal Access Tokens"**.
+
+### Room membership
+
+The bot only receives messages from rooms it is a **member** of (the DDP `__my_messages__` subscription covers exactly the bot's rooms). DMs work out of the box; for channels and private groups, invite it:
+
+```
+/invite @hermes-bot
+```
+
+In channels the bot answers only when @mentioned (unless the room ID is in `ROCKETCHAT_FREE_RESPONSE_CHANNELS` or you set `ROCKETCHAT_REQUIRE_MENTION=false`).
+
+### Admin settings worth checking
+
+| Setting | Where | Why |
+|---------|-------|-----|
+| `Message_AllowUnrecognizedSlashCommand` → **on** | Admin → Settings → Message | RC Desktop/Browser clients swallow unknown `/` commands client-side, so Hermes commands like `/new` or `/status` never reach the server. Mobile clients are unaffected. Alternatively set the env var `OVERWRITE_SETTING_Message_AllowUnrecognizedSlashCommand=true` on the RC server. |
+| Rate Limiter | Admin → Settings → Rate Limiter | A busy bot can hit `429 Too Many Requests` on the REST API. Raise the API rate limits or exempt the bot's IP. |
+| `Message_MaxAllowedSize` | Admin → Settings → Message | The adapter chunks long replies at 5000 characters (RC's default). If you lowered this setting below 5000, long messages will be rejected. |
+
+### Permissions for topic sync (optional)
+
+The plugin mirrors Hermes session titles to room topics (`dm.setTopic` / `channels.setTopic` / `groups.setTopic`). Setting a channel topic requires room-edit rights — make the bot **owner/moderator of the room**, or grant the `edit-room` permission to the `bot` role (**Admin → Permissions**). Without it, topic sync silently no-ops and everything else keeps working; DM topics need no extra permission.
+
+### Reverse proxy (nginx / traefik)
+
+The inbound stream is a long-lived WebSocket at `/websocket`. With nginx in front of RC, make sure it isn't killed by the default 60s read timeout:
+
+```nginx
+location /websocket {
+    proxy_pass http://rocketchat;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_read_timeout 600s;
+}
+```
+
+The adapter reconnects automatically (exponential backoff 2–60s), but a too-aggressive proxy timeout causes needless reconnect churn.
 
 ---
 

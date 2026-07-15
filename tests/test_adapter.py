@@ -33,20 +33,27 @@ if not platform_registry.is_registered("rocketchat"):
     )
 
 
-def _load_adapter():
-    """Import adapter.py under a unique module name (no sys.path tricks)."""
-    name = "plugin_adapter_rocketchat"
+def _load_plugin():
+    """Import the plugin as a package under a fixed module name.
+
+    The repo directory name ("hermes-plugin-rocketchat") is not a valid
+    Python identifier, so import by path with explicit package search
+    locations — this makes the plugin's relative imports work.
+    """
+    name = "rocketchat_plugin"
     if name in sys.modules:
         return sys.modules[name]
-    path = Path(__file__).resolve().parents[1] / "adapter.py"
-    spec = importlib.util.spec_from_file_location(name, path)
+    root = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location(
+        name, root / "__init__.py", submodule_search_locations=[str(root)]
+    )
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
 
 
-_rc = _load_adapter()
+_rc = _load_plugin()
 
 RocketchatAdapter = _rc.RocketchatAdapter
 check_requirements = _rc.check_requirements
