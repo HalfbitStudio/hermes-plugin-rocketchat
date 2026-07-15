@@ -26,7 +26,7 @@ Environment variables:
     ROCKETCHAT_HOME_CHANNEL     Room ID for cron/notification delivery
     ROCKETCHAT_REQUIRE_MENTION  Require @mention in channels (default: true)
     ROCKETCHAT_FREE_RESPONSE_CHANNELS  Rooms exempt from mention requirement
-    ROCKETCHAT_REPLY_MODE       Reply mode: 'thread' or 'off' (default: off)
+    ROCKETCHAT_REPLY_MODE       Channel/group replies: 'thread' or 'off' (default: off)
     ROCKETCHAT_REACTIONS        Add 👀/✅/❌ reactions to messages (default: true)
 """
 
@@ -82,7 +82,8 @@ def register(ctx):
         platform_hint=(
             "You are chatting via Rocket.Chat. Rocket.Chat renders Markdown natively. "
             "In channels, users must @mention you for the bot to respond (unless the room "
-            "is in the free-response list). Replies can be threaded (ROCKETCHAT_REPLY_MODE). "
+            "is in the free-response list). Channel/group replies can be threaded "
+            "(ROCKETCHAT_REPLY_MODE); DM replies always stay flat. "
             "Keep responses clear and concise."
         ),
     )

@@ -42,7 +42,6 @@ class InboundMixin:
         chat_type = self._room_type_cache.get(room_id)
         if chat_type is None:
             chat_type = await self._resolve_room_type(room_id)
-            self._room_type_cache[room_id] = chat_type
 
         # Handle system messages: skip all except topic changes in DMs.
         t_type = post.get("t")
@@ -261,7 +260,12 @@ class InboundMixin:
         """Look up a room's type via REST. Defaults to 'channel' on failure."""
         data = await self._api_get("rooms.info", params={"roomId": room_id})
         room = (data or {}).get("room") or {}
-        return _ROOM_TYPE_MAP.get(room.get("t", "c"), "channel")
+        raw_type = room.get("t")
+        chat_type = _ROOM_TYPE_MAP.get(raw_type)
+        if chat_type:
+            self._room_type_cache[room_id] = chat_type
+            return chat_type
+        return "channel"
 
     # ── Thread context ────────────────────────────────────────────────
 

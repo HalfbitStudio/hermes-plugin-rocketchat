@@ -43,8 +43,10 @@ position 0 for a real command.
 
 ### 3. Room Type Detection
 
-Uses `GET /api/v1/rooms.info` with a per-room cache. Returns `c`, `p`, `d` (channel,
-private group, direct message). Cache is lazy — populated on first message from a room.
+Uses `GET /api/v1/rooms.info` with a per-room cache. Rocket.Chat returns `c`, `p`,
+`d`; the adapter caches normalized `channel`, `group`, `dm` values. Failed lookups
+fall back to `channel` for inbound gating but are not cached, so outbound threading
+fails flat until the room type is positively known.
 
 ### 4. TTS Audio Pipeline
 
@@ -90,6 +92,17 @@ die Nachricht erreicht Hermes gar nicht. Mobile Clients sind nicht betroffen.
 
 Nur RC-Admins mit `edit-privileged-setting` Permission können das setzen.
 
+### 9. DM Replies Are Always Flat
+
+`ROCKETCHAT_REPLY_MODE=thread` applies only to channels and private groups.
+Bot replies in direct messages never receive `tmid`, including text and media
+replies. Existing user-created DM threads retain their own Hermes sessions and
+context, but the bot's answer is delivered to the main DM timeline.
+
+Use `_thread_target_for_reply()` for every interactive outbound path. It also
+prefers `metadata["thread_id"]` over `reply_to`, because Hermes carries an
+existing thread's root in metadata while `reply_to` may be a child message ID.
+
 ## Known Pitfalls
 
 | Pitfall | Detail | Mitigation |
@@ -97,7 +110,7 @@ Nur RC-Admins mit `edit-privileged-setting` Permission können das setzen.
 | `totp-required` | PAT without "Ignore Two Factor" generates TOTP challenge | User must re-create PAT with checkbox |
 | DDP subscription lost on reconnect | RC does NOT resume DDP subs across reconnects | Full re-login + re-sub in `_ws_loop()` |
 | Image URLs truncated | RC has a ~2KB URL limit in messages | `_send_url_as_file()` uploads as file attachment |
-| Room type ambiguity | `rooms.info` can fail for archived rooms | `_resolve_room_type()` falls back to `'c'` |
+| Room type ambiguity | `rooms.info` can fail for archived rooms | Inbound falls back to `channel` without caching; outbound threading fails flat |
 | ffmpeg not installed | Audio processing breaks silently | `_convert_audio_to_mp3()` returns None, logs warning |
 | Nginx close WS on 60s idle | Default proxy timeout kills long connections | Set `proxy_read_timeout 600s` |
 | `Message_AllowUnrecognizedSlashCommand` | Desktop browser shows "invalid command" error | RC admin setting required (not an adapter fix) |

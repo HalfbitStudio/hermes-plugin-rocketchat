@@ -139,7 +139,7 @@ The adapter reconnects automatically (exponential backoff 2–60s), but a too-ag
 | `ROCKETCHAT_HOME_CHANNEL` | — | — | Room ID for cron / notification delivery |
 | `ROCKETCHAT_REQUIRE_MENTION` | — | `true` | Require @mention to trigger in channels |
 | `ROCKETCHAT_FREE_RESPONSE_CHANNELS` | — | — | Room IDs where @mention is not required |
-| `ROCKETCHAT_REPLY_MODE` | — | `off` | `thread` for threaded replies, `off` for flat |
+| `ROCKETCHAT_REPLY_MODE` | — | `off` | `thread` for threaded channel/group replies, `off` for flat; bot replies in DMs stay flat |
 
 ---
 
@@ -151,7 +151,7 @@ The adapter reconnects automatically (exponential backoff 2–60s), but a too-ag
 | REST API (outbound) | ✅ `chat.postMessage` |
 | File upload | ✅ Two-step `rooms.media` + `rooms.mediaConfirm` |
 | Attachment download | ✅ With image/audio/document cache |
-| Thread support | ✅ Via `tmid` |
+| Thread support | ✅ Via `tmid` in channels/groups; bot replies in DMs stay flat |
 | Mention gating | ✅ Configurable per room |
 | Typing indicator | ✅ Rocket.Chat 8.x compatible |
 | Reconnect | ✅ Exponential backoff (2s–60s) |

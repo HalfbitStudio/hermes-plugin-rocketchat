@@ -48,6 +48,6 @@ optional_env:
     prompt: "Free-response room IDs (comma-separated)"
     password: false
   - name: ROCKETCHAT_REPLY_MODE
-    description: "Reply mode: 'thread' for threaded replies, 'off' for flat"
+    description: "Reply mode: 'thread' in channels/groups, 'off' for flat; DM bot replies stay flat"
     prompt: "Reply mode (thread / off)"
     password: false

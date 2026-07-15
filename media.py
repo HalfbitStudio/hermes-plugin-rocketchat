@@ -23,6 +23,7 @@ class MediaMixin:
         content_type: str,
         caption: Optional[str] = None,
         tmid: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> Optional[str]:
         """Upload a file via the two-step rooms.media flow.
 
@@ -68,8 +69,11 @@ class MediaMixin:
         payload: Dict[str, Any] = {}
         if caption:
             payload["msg"] = caption
-        if tmid and self._reply_mode == "thread":
-            payload["tmid"] = tmid
+        thread_target = await self._thread_target_for_reply(
+            room_id, tmid, metadata
+        )
+        if thread_target:
+            payload["tmid"] = thread_target
         step2 = await self._api_post(step2_path, payload)
         msg = step2.get("message") or {}
         return msg.get("_id")
@@ -84,7 +88,7 @@ class MediaMixin:
     ) -> SendResult:
         """Download an image and upload it as a file attachment."""
         return await self._send_url_as_file(
-            chat_id, image_url, caption, reply_to, "image"
+            chat_id, image_url, caption, reply_to, "image", metadata
         )
 
     async def send_image_file(
@@ -97,7 +101,7 @@ class MediaMixin:
     ) -> SendResult:
         """Upload a local image file."""
         return await self._send_local_file(
-            chat_id, image_path, caption, reply_to
+            chat_id, image_path, caption, reply_to, metadata=metadata
         )
 
     async def send_document(
@@ -111,7 +115,7 @@ class MediaMixin:
     ) -> SendResult:
         """Upload a local file as a document."""
         return await self._send_local_file(
-            chat_id, file_path, caption, reply_to, file_name
+            chat_id, file_path, caption, reply_to, file_name, metadata
         )
 
     async def send_voice(
@@ -124,7 +128,7 @@ class MediaMixin:
     ) -> SendResult:
         """Upload an audio file."""
         return await self._send_local_file(
-            chat_id, audio_path, caption, reply_to
+            chat_id, audio_path, caption, reply_to, metadata=metadata
         )
 
     async def send_video(
@@ -137,7 +141,7 @@ class MediaMixin:
     ) -> SendResult:
         """Upload a video file."""
         return await self._send_local_file(
-            chat_id, video_path, caption, reply_to
+            chat_id, video_path, caption, reply_to, metadata=metadata
         )
 
     # ------------------------------------------------------------------
@@ -151,12 +155,15 @@ class MediaMixin:
         caption: Optional[str],
         reply_to: Optional[str],
         kind: str = "file",
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
         """Download a URL and upload it as a file attachment."""
         from tools.url_safety import is_safe_url
         if not is_safe_url(url):
             logger.warning("Rocket.Chat: blocked unsafe URL (SSRF protection)")
-            return await self.send(chat_id, f"{caption or ''}\n{url}".strip(), reply_to)
+            return await self.send(
+                chat_id, f"{caption or ''}\n{url}".strip(), reply_to, metadata
+            )
 
         import aiohttp
 
@@ -172,7 +179,9 @@ class MediaMixin:
                             await asyncio.sleep(1.5 * (attempt + 1))
                             continue
                     if resp.status >= 400:
-                        return await self.send(chat_id, f"{caption or ''}\n{url}".strip(), reply_to)
+                        return await self.send(
+                            chat_id, f"{caption or ''}\n{url}".strip(), reply_to, metadata
+                        )
                     file_data = await resp.read()
                     ct = resp.content_type or "application/octet-stream"
                     break
@@ -180,16 +189,22 @@ class MediaMixin:
                 if attempt < 2:
                     await asyncio.sleep(1.5 * (attempt + 1))
                     continue
-                return await self.send(chat_id, f"{caption or ''}\n{url}".strip(), reply_to)
+                return await self.send(
+                    chat_id, f"{caption or ''}\n{url}".strip(), reply_to, metadata
+                )
 
         if file_data is None:
-            return await self.send(chat_id, f"{caption or ''}\n{url}".strip(), reply_to)
+            return await self.send(
+                chat_id, f"{caption or ''}\n{url}".strip(), reply_to, metadata
+            )
 
         msg_id = await self._upload_file(
-            chat_id, file_data, fname, ct, caption, reply_to,
+            chat_id, file_data, fname, ct, caption, reply_to, metadata,
         )
         if not msg_id:
-            return await self.send(chat_id, f"{caption or ''}\n{url}".strip(), reply_to)
+            return await self.send(
+                chat_id, f"{caption or ''}\n{url}".strip(), reply_to, metadata
+            )
         return SendResult(success=True, message_id=msg_id)
 
     async def _send_local_file(
@@ -199,6 +214,7 @@ class MediaMixin:
         caption: Optional[str],
         reply_to: Optional[str],
         file_name: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
         """Upload a local file via the two-step rooms.media flow."""
         import mimetypes
@@ -206,7 +222,10 @@ class MediaMixin:
         p = Path(file_path)
         if not p.exists():
             return await self.send(
-                chat_id, f"{caption or ''}\n(file not found: {file_path})", reply_to
+                chat_id,
+                f"{caption or ''}\n(file not found: {file_path})",
+                reply_to,
+                metadata,
             )
 
         fname = file_name or p.name
@@ -214,7 +233,7 @@ class MediaMixin:
         file_data = p.read_bytes()
 
         msg_id = await self._upload_file(
-            chat_id, file_data, fname, ct, caption, reply_to,
+            chat_id, file_data, fname, ct, caption, reply_to, metadata,
         )
         if not msg_id:
             return SendResult(success=False, error="File upload failed")

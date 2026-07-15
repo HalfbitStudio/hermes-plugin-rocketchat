@@ -74,7 +74,7 @@ systemctl restart hermes-gateway
 | `ROCKETCHAT_HOME_CHANNEL` | — | — | Room-ID für Cron-Benachrichtigungen |
 | `ROCKETCHAT_REQUIRE_MENTION` | — | `true` | @mention-Pflicht in Channels |
 | `ROCKETCHAT_FREE_RESPONSE_CHANNELS` | — | — | Rooms ohne @mention-Pflicht |
-| `ROCKETCHAT_REPLY_MODE` | — | `off` | `thread` für verschachtelte Replies |
+| `ROCKETCHAT_REPLY_MODE` | — | `off` | `thread` für Replies in Channels/Gruppen; Bot-Antworten in DMs bleiben flach |
 
 ---
 
@@ -86,7 +86,7 @@ systemctl restart hermes-gateway
 | REST API (Outbound) | ✅ `chat.postMessage` |
 | File Upload | ✅ Zwei-Step `rooms.media` |
 | Attachment Download | ✅ Inkl. Image/Audio/Document-Cache |
-| Thread Support | ✅ Via `tmid` |
+| Thread Support | ✅ Via `tmid` in Channels/Gruppen; Bot-Antworten in DMs bleiben flach |
 | Mention Gating | ✅ Konfigurierbar pro Room |
 | Typing Indicator | ✅ Rocket.Chat 8.x-kompatibel |
 | Reconnect | ✅ Exponential Backoff (2s–60s) |

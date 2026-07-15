@@ -204,6 +204,35 @@ class RocketchatAdapter(
         self._mark_disconnected()
         logger.info("Rocket.Chat: disconnected")
 
+    async def _thread_target_for_reply(
+        self,
+        chat_id: str,
+        reply_to: Optional[str],
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Optional[str]:
+        """Return the Rocket.Chat thread root for a non-DM reply.
+
+        Hermes passes the root of an existing thread in metadata and the
+        triggering message id in ``reply_to``.  DMs intentionally stay flat,
+        even when ``ROCKETCHAT_REPLY_MODE=thread``.  Unknown room types also
+        fail flat; normal inbound handling populates the cache before send().
+        """
+        thread_target = (metadata or {}).get("thread_id") or reply_to
+        if self._reply_mode != "thread" or not thread_target:
+            return None
+
+        chat_type = self._room_type_cache.get(chat_id)
+        if chat_type is None:
+            # _resolve_room_type() caches only verified API results. Its
+            # user-facing fallback is "channel", but an unresolved target
+            # must stay flat so a transient lookup failure cannot thread a DM.
+            await self._resolve_room_type(chat_id)
+            chat_type = self._room_type_cache.get(chat_id)
+
+        if chat_type not in ("channel", "group"):
+            return None
+        return thread_target
+
     async def send(
         self,
         chat_id: str,
@@ -217,6 +246,9 @@ class RocketchatAdapter(
 
         formatted = self.format_message(content)
         chunks = self.truncate_message(formatted, MAX_MESSAGE_LENGTH)
+        thread_target = await self._thread_target_for_reply(
+            chat_id, reply_to, metadata
+        )
 
         last_id = None
         for chunk in chunks:
@@ -224,8 +256,8 @@ class RocketchatAdapter(
                 "roomId": chat_id,
                 "text": chunk,
             }
-            if reply_to and self._reply_mode == "thread":
-                payload["tmid"] = reply_to
+            if thread_target:
+                payload["tmid"] = thread_target
 
             data = await self._api_post("chat.postMessage", payload)
             if not data or not data.get("success"):
@@ -349,9 +381,10 @@ class RocketchatAdapter(
         if not room:
             return {"name": chat_id, "type": "channel"}
 
-        raw_type = room.get("t", "c")
+        raw_type = room.get("t")
         chat_type = _ROOM_TYPE_MAP.get(raw_type, "channel")
-        self._room_type_cache[chat_id] = chat_type
+        if raw_type in _ROOM_TYPE_MAP:
+            self._room_type_cache[chat_id] = chat_type
 
         if chat_type == "dm":
             others = [

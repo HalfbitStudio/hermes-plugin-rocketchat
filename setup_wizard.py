@@ -54,7 +54,9 @@ def interactive_setup() -> None:
     print()
     print_info("⚙️  Options")
 
-    reply_mode = prompt_yes_no("Use threaded replies in channels?", False)
+    reply_mode = prompt_yes_no(
+        "Use threaded replies in channels/private groups?", False
+    )
     if reply_mode:
         save_env_value("ROCKETCHAT_REPLY_MODE", "thread")
 
@@ -91,5 +93,4 @@ def interactive_setup() -> None:
 # ---------------------------------------------------------------------------
 # Plugin registration
 # ---------------------------------------------------------------------------
-
 

@@ -378,8 +378,10 @@ class TestSend:
         return adapter
 
     @pytest.mark.asyncio
-    async def test_tmid_set_in_thread_mode(self):
+    @pytest.mark.parametrize("room_type", ["channel", "group"])
+    async def test_tmid_set_for_channel_or_group_in_thread_mode(self, room_type):
         adapter = self._adapter("thread")
+        adapter._room_type_cache["room1"] = room_type
         posted = {}
 
         async def fake_post(path, payload):
@@ -391,6 +393,110 @@ class TestSend:
         assert result.success is True
         assert result.message_id == "new_msg"
         assert posted["tmid"] == "parent_msg"
+
+    @pytest.mark.asyncio
+    async def test_tmid_not_set_for_dm_in_thread_mode(self):
+        adapter = self._adapter("thread")
+        adapter._room_type_cache["room1"] = "dm"
+        posted = {}
+
+        async def fake_post(path, payload):
+            posted.update(payload)
+            return {"success": True, "message": {"_id": "new_msg"}}
+
+        adapter._api_post = fake_post
+        await adapter.send("room1", "hello", reply_to="parent_msg")
+        assert "tmid" not in posted
+
+    @pytest.mark.asyncio
+    async def test_existing_thread_root_from_metadata_wins(self):
+        adapter = self._adapter("thread")
+        adapter._room_type_cache["room1"] = "channel"
+        posted = {}
+
+        async def fake_post(path, payload):
+            posted.update(payload)
+            return {"success": True, "message": {"_id": "new_msg"}}
+
+        adapter._api_post = fake_post
+        await adapter.send(
+            "room1",
+            "hello",
+            reply_to="child_msg",
+            metadata={"thread_id": "root_msg"},
+        )
+        assert posted["tmid"] == "root_msg"
+
+    @pytest.mark.asyncio
+    async def test_unknown_room_type_stays_flat(self):
+        adapter = self._adapter("thread")
+        adapter._api_get = AsyncMock(return_value={})
+        posted = {}
+
+        async def fake_post(path, payload):
+            posted.update(payload)
+            return {"success": True, "message": {"_id": "new_msg"}}
+
+        adapter._api_post = fake_post
+        await adapter.send("room1", "hello", reply_to="parent_msg")
+        assert "tmid" not in posted
+        assert "room1" not in adapter._room_type_cache
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("raw_type", "expected_type", "expected_tmid"),
+        [
+            ("d", "dm", None),
+            ("c", "channel", "parent_msg"),
+            ("p", "group", "parent_msg"),
+        ],
+    )
+    async def test_uncached_room_type_is_resolved_before_threading(
+        self, raw_type, expected_type, expected_tmid
+    ):
+        adapter = self._adapter("thread")
+        adapter._api_get = AsyncMock(
+            return_value={"room": {"t": raw_type}}
+        )
+        posted = {}
+
+        async def fake_post(path, payload):
+            posted.update(payload)
+            return {"success": True, "message": {"_id": "new_msg"}}
+
+        adapter._api_post = fake_post
+        await adapter.send("room1", "hello", reply_to="parent_msg")
+
+        assert adapter._room_type_cache["room1"] == expected_type
+        if expected_tmid is None:
+            assert "tmid" not in posted
+        else:
+            assert posted["tmid"] == expected_tmid
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("room_type", "expected_tmid"),
+        [("dm", None), ("channel", "root_msg"), ("group", "root_msg")],
+    )
+    async def test_metadata_only_thread_target(
+        self, room_type, expected_tmid
+    ):
+        adapter = self._adapter("thread")
+        adapter._room_type_cache["room1"] = room_type
+        posted = {}
+
+        async def fake_post(path, payload):
+            posted.update(payload)
+            return {"success": True, "message": {"_id": "new_msg"}}
+
+        adapter._api_post = fake_post
+        await adapter.send(
+            "room1", "hello", metadata={"thread_id": "root_msg"}
+        )
+        if expected_tmid is None:
+            assert "tmid" not in posted
+        else:
+            assert posted["tmid"] == expected_tmid
 
     @pytest.mark.asyncio
     async def test_tmid_not_set_in_flat_mode(self):
@@ -419,6 +525,46 @@ class TestSend:
         adapter._api_post = AsyncMock(return_value={"success": False})
         result = await adapter.send("room1", "hello")
         assert result.success is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("room_type", "expected_tmid"),
+        [("dm", None), ("channel", "root_msg"), ("group", "root_msg")],
+    )
+    async def test_media_confirm_uses_same_thread_policy(
+        self, room_type, expected_tmid
+    ):
+        adapter = self._adapter("thread")
+        adapter._room_type_cache["room1"] = room_type
+
+        upload_response = MagicMock(status=200)
+        upload_response.json = AsyncMock(
+            return_value={"file": {"_id": "file1"}}
+        )
+        upload_context = MagicMock()
+        upload_context.__aenter__ = AsyncMock(return_value=upload_response)
+        upload_context.__aexit__ = AsyncMock(return_value=False)
+        adapter._session = MagicMock()
+        adapter._session.post.return_value = upload_context
+        adapter._api_post = AsyncMock(
+            return_value={"message": {"_id": "media_msg"}}
+        )
+
+        result = await adapter._upload_file(
+            "room1",
+            b"data",
+            "file.txt",
+            "text/plain",
+            tmid="child_msg",
+            metadata={"thread_id": "root_msg"},
+        )
+
+        assert result == "media_msg"
+        confirm_payload = adapter._api_post.await_args.args[1]
+        if expected_tmid is None:
+            assert "tmid" not in confirm_payload
+        else:
+            assert confirm_payload["tmid"] == expected_tmid
 
 
 # ---------------------------------------------------------------------------
@@ -450,6 +596,7 @@ class TestRoomTypes:
         adapter = _make_adapter()
         adapter._api_get = AsyncMock(return_value={})
         assert await adapter._resolve_room_type("r1") == "channel"
+        assert "r1" not in adapter._room_type_cache
 
     @pytest.mark.asyncio
     async def test_get_chat_info_dm_name_from_other_user(self):
@@ -631,10 +778,15 @@ class TestThreadContext:
 
     @pytest.mark.asyncio
     async def test_not_injected_when_session_exists(self):
-        adapter = _wired_adapter(room_type="dm")
+        adapter = _wired_adapter(room_type="channel")
         adapter._has_active_session_for_thread = MagicMock(return_value=True)
         adapter._fetch_thread_context = AsyncMock()
-        await adapter._handle_message(_post(msg="hello", tmid="t1"))
+        await adapter._handle_message(_post(
+            msg="@hermesbot hello",
+            tmid="t1",
+            mentions=[{"_id": "bot_uid", "username": "hermesbot"}],
+        ))
+        adapter._has_active_session_for_thread.assert_called_once()
         adapter._fetch_thread_context.assert_not_awaited()
 
     @pytest.mark.asyncio
