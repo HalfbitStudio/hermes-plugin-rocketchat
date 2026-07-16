@@ -92,7 +92,15 @@ die Nachricht erreicht Hermes gar nicht. Mobile Clients sind nicht betroffen.
 
 Nur RC-Admins mit `edit-privileged-setting` Permission können das setzen.
 
-### 9. DM Replies Are Always Flat
+### 9. Sender Identity Uses the Display Name
+
+Rocket.Chat message objects may carry both a login (`u.username`) and the
+human-facing name shown in the UI (`u.name`). Set `SessionSource.user_name`
+using `u.name → u.username → u._id`; otherwise Hermes can address a DM user by
+an unrelated login. Authorization and session isolation continue to use the
+stable `u._id`.
+
+### 10. DM Replies Are Always Flat
 
 `ROCKETCHAT_REPLY_MODE=thread` applies only to channels and private groups.
 Bot replies in direct messages never receive `tmid`, including text and media

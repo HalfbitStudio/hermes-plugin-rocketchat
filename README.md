@@ -153,6 +153,7 @@ notice. It does not configure a delivery target or change cron routing.
 |---------|--------|
 | DDP WebSocket (inbound) | ✅ `__my_messages__` subscription |
 | REST API (outbound) | ✅ `chat.postMessage` |
+| DM sender identity | ✅ Rocket.Chat display name with username/ID fallbacks |
 | File upload | ✅ Two-step `rooms.media` + `rooms.mediaConfirm` |
 | Attachment download | ✅ With image/audio/document cache |
 | Thread support | ✅ Via `tmid` in channels/groups; bot replies in DMs stay flat |

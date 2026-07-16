@@ -17,7 +17,12 @@ import pytest
 from gateway.config import Platform, PlatformConfig
 from gateway.platform_registry import PlatformEntry, platform_registry
 from gateway.platforms.base import MessageEvent, MessageType, ProcessingOutcome
-from gateway.session import SessionSource
+from gateway.session import (
+    SessionContext,
+    SessionSource,
+    build_session_context_prompt,
+    build_session_key,
+)
 
 # ``Platform("rocketchat")`` resolves through the runtime platform registry
 # (the enum's _missing_ hook rejects arbitrary strings) — register a stub
@@ -746,6 +751,74 @@ class TestHandleMessage:
         assert event.source.chat_type == "dm"
 
     @pytest.mark.asyncio
+    async def test_dm_prefers_display_name_over_username(self):
+        adapter = _wired_adapter(room_type="dm")
+        await adapter._handle_message(_post(
+            u={"_id": "u-adam", "username": "marcin", "name": "Adam"},
+        ))
+
+        event = adapter.handle_message.await_args[0][0]
+        assert event.source.chat_id == "room1"
+        assert event.source.chat_name == "Adam"
+        assert event.source.user_id == "u-adam"
+        assert event.source.user_name == "Adam"
+        assert build_session_key(event.source) == (
+            "agent:main:rocketchat:dm:room1"
+        )
+        prompt = build_session_context_prompt(SessionContext(
+            source=event.source,
+            connected_platforms=[],
+            home_channels={},
+        ))
+        assert "DM with Adam" in prompt
+        assert '**User:** "Adam"' in prompt
+        assert "marcin" not in prompt
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("display_name", [None, "", "   "])
+    async def test_dm_falls_back_to_username_without_display_name(
+        self, display_name
+    ):
+        adapter = _wired_adapter(room_type="dm")
+        await adapter._handle_message(_post(
+            u={
+                "_id": "u-marcin",
+                "username": "marcin",
+                "name": display_name,
+            },
+        ))
+
+        event = adapter.handle_message.await_args[0][0]
+        assert event.source.user_name == "marcin"
+
+    @pytest.mark.asyncio
+    async def test_each_dm_uses_its_current_sender_identity(self):
+        adapter = _wired_adapter(room_type="dm")
+        await adapter._handle_message(_post(
+            post_id="p-adam",
+            rid="dm-adam",
+            u={"_id": "u-adam", "username": "adam.login", "name": "Adam"},
+        ))
+        await adapter._handle_message(_post(
+            post_id="p-marcin",
+            rid="dm-marcin",
+            u={
+                "_id": "u-marcin",
+                "username": "marcin.login",
+                "name": "Marcin",
+            },
+        ))
+
+        events = [call.args[0] for call in adapter.handle_message.await_args_list]
+        assert [
+            (event.source.chat_id, event.source.user_id, event.source.user_name)
+            for event in events
+        ] == [
+            ("dm-adam", "u-adam", "Adam"),
+            ("dm-marcin", "u-marcin", "Marcin"),
+        ]
+
+    @pytest.mark.asyncio
     async def test_channel_without_mention_gated(self):
         adapter = _wired_adapter(room_type="channel")
         await adapter._handle_message(_post())
@@ -809,22 +882,26 @@ class TestThreadContext:
             if path == "chat.getMessage":
                 return {"message": {
                     "_id": "t1", "msg": "parent text", "ts": "1",
-                    "u": {"_id": "u1", "username": "alice"},
+                    "u": {
+                        "_id": "u1", "username": "alice.login", "name": "Alice",
+                    },
                 }}
             assert params["tmid"] == "t1"
             return {"messages": [
                 {"_id": "m3", "msg": "@hermesbot help", "ts": "3",
                  "u": {"_id": "u1", "username": "alice"}},  # triggering message
                 {"_id": "m2", "msg": "reply one", "ts": "2",
-                 "u": {"_id": "u2", "username": "bob"}},
+                 "u": {"_id": "u2", "username": "bob.login", "name": "Bob"}},
                 {"_id": "mB", "msg": "own reply", "ts": "2.5",
                  "u": {"_id": "bot_uid", "username": "hermesbot"}},
             ]}
 
         adapter._api_get = fake_get
         ctx = await adapter._fetch_thread_context("t1", "m3")
-        assert "[thread parent] alice: parent text" in ctx
-        assert "[unverified] bob: reply one" in ctx
+        assert "[thread parent] Alice: parent text" in ctx
+        assert "[unverified] Bob: reply one" in ctx
+        assert "alice.login" not in ctx
+        assert "bob.login" not in ctx
         assert "own reply" not in ctx  # bot's own replies skipped
         assert "help" not in ctx  # triggering message excluded
         assert ctx.endswith("\n\n")

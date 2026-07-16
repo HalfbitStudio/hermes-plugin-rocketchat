@@ -17,6 +17,15 @@ from .helpers import _ROOM_TYPE_MAP
 logger = logging.getLogger(__name__)
 
 
+def _sender_display_name(sender: Dict[str, Any]) -> str:
+    """Return Rocket.Chat's human-facing sender name with safe fallbacks."""
+    for key in ("name", "username", "_id"):
+        value = sender.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
 class InboundMixin:
     """Inbound handling of :class:`~.adapter.RocketchatAdapter`."""
 
@@ -24,7 +33,7 @@ class InboundMixin:
         """Process an incoming Rocket.Chat message."""
         sender = post.get("u") or {}
         sender_id = sender.get("_id", "")
-        sender_name = sender.get("username", "") or sender_id
+        sender_name = _sender_display_name(sender)
 
         # Ignore own messages.
         if sender_id == self._bot_user_id:
@@ -55,6 +64,7 @@ class InboundMixin:
 
                     source = self.build_source(
                         chat_id=room_id,
+                        chat_name=sender_name,
                         chat_type=chat_type,
                         user_id=sender_id,
                         user_name=sender_name,
@@ -232,6 +242,7 @@ class InboundMixin:
 
         source = self.build_source(
             chat_id=room_id,
+            chat_name=sender_name if chat_type == "dm" else None,
             chat_type=chat_type,
             user_id=sender_id,
             user_name=sender_name,
@@ -379,7 +390,7 @@ class InboundMixin:
                 ):
                     trust_tag = "[unverified] "
                 prefix = "[thread parent] " if is_parent else ""
-                name = sender.get("username", "") or sender_id or "unknown"
+                name = _sender_display_name(sender) or "unknown"
                 parts.append(f"{prefix}{trust_tag}{name}: {text}")
 
             if not parts:
