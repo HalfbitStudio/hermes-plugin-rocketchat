@@ -19,7 +19,7 @@ focused modules and built on `aiohttp` (zero new dependencies).
 | `inbound.py` | Inbound parsing, mention/thread gating, and dispatch |
 | `media.py` | Attachment download and two-step media upload pipeline |
 | `helpers.py` | Configuration, requirements, formatting, and standalone cron sender |
-| `tools.py` | Agent-callable channel, DM, posting, and file-upload tools |
+| `tools.py` | Agent-callable room management, posting, upload, DM, and read-only retrieval tools |
 | `setup_wizard.py` | Interactive Hermes gateway setup |
 | `plugin.yaml` | Plugin manifest — env vars, discovery metadata |
 | `__init__.py` | Exports `register()` for Hermes plugin discovery |
@@ -151,6 +151,24 @@ Only regular files are accepted. Reads run outside the event loop, and
 `ROCKETCHAT_AGENT_FILE_MAX_BYTES` provides a local guard (100 MiB by default,
 `0` to disable) before Rocket.Chat and proxy limits are applied.
 
+### 13. Read-Only Retrieval Is Explicitly Scoped and Bounded
+
+Retrieval tools return compact normalized records, not raw Rocket.Chat payloads.
+`rocketchat_search_messages` and `rocketchat_get_history` require an exact
+`room_id`; never expand them into unbounded workspace-wide reads. Search and
+history accept 1–100 records, while thread retrieval accepts 1–500 replies;
+reject values outside those ranges rather than silently clamping them. History
+defaults `include_threads` to false. It maps to `showThreadMessages` for channels,
+private groups, and DMs. Always send the explicit true/false value: Rocket.Chat's
+history endpoints do not all share the same default.
+
+`rocketchat_get_thread` accepts the exact root `tmid`. Fetch its parent separately
+with `chat.getMessage`, because `chat.getThreadMessages` returns replies, then
+normalize the parent and replies into one chronological result. Permalinks accept
+only `message_id`, resolve the message and room server-side, and URL-encode every
+dynamic path/query component. Route public channels as `channel/<room.name>`,
+private groups as `group/<room.name>`, and DMs as `direct/<rid>`.
+
 ## Known Pitfalls
 
 | Pitfall | Detail | Mitigation |
@@ -185,7 +203,8 @@ Only regular files are accepted. Reads run outside the event loop, and
 
 **Agent tools:**
 - `tools.py`: `handle_list_channels()`, `handle_create_channel()`, `handle_post()`,
-  `handle_send_file()`, `handle_dm()`
+  `handle_send_file()`, `handle_dm()`, `handle_search_messages()`,
+  `handle_get_history()`, `handle_get_thread()`, `handle_get_permalink()`
 
 **Reactions:**
 - `_add_reaction(msg_id, emoji)`, `_remove_reaction(msg_id, emoji)` — 👀✅❌

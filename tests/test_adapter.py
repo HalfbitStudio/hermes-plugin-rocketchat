@@ -1097,7 +1097,12 @@ class TestAgentTools:
             "rocketchat_post",
             "rocketchat_send_file",
             "rocketchat_dm",
+            "rocketchat_search_messages",
+            "rocketchat_get_history",
+            "rocketchat_get_thread",
+            "rocketchat_get_permalink",
         }
+        assert len(names) == 9
         assert {c[1]["toolset"] for c in ctx.register_tool.call_args_list} == {
             "rocketchat"
         }
@@ -1522,3 +1527,562 @@ class TestAgentTools:
         monkeypatch.setattr(_tools, "_api", fake_api)
         out = json.loads(await _tools.handle_list_channels({}))
         assert "error" in out
+
+
+def _raw_tool_message(
+    message_id,
+    *,
+    room_id="r1",
+    thread_id=None,
+    text="hello",
+    timestamp="2026-07-21T10:00:00.000Z",
+    updated_at="2026-07-21T10:00:01.000Z",
+    user_id="u1",
+    username="alice.login",
+    name="Alice",
+    message_type=None,
+):
+    message = {
+        "_id": message_id,
+        "rid": room_id,
+        "msg": text,
+        "ts": timestamp,
+        "_updatedAt": updated_at,
+        "u": {
+            "_id": user_id,
+            "username": username,
+            "name": name,
+        },
+    }
+    if thread_id is not None:
+        message["tmid"] = thread_id
+    if message_type is not None:
+        message["t"] = message_type
+    return message
+
+
+def _assert_normalized_message(message, *, message_id, thread_id=None):
+    assert message["message_id"] == message_id
+    assert message["room_id"] == "r1"
+    assert message["thread_id"] == thread_id
+    assert message["text"] == "hello"
+    assert message["timestamp"] == "2026-07-21T10:00:00.000Z"
+    assert message["updated_at"] == "2026-07-21T10:00:01.000Z"
+    assert message["sender"] == {
+        "user_id": "u1",
+        "username": "alice.login",
+        "name": "Alice",
+    }
+    assert message["type"] == "message"
+
+
+def test_tool_message_normalizer_compacts_files_and_reactions():
+    message = _raw_tool_message("m1")
+    message["file"] = {
+        "_id": "f1",
+        "name": "report.pdf",
+        "type": "application/pdf",
+        "size": 42,
+    }
+    message["files"] = [
+        message["file"],
+        {
+            "_id": "f2",
+            "title": "chart.png",
+            "contentType": "image/png",
+            "url": "/file-upload/f2/chart.png",
+        },
+    ]
+    message["reactions"] = {
+        ":white_check_mark:": {
+            "usernames": ["alice.login", "bob"],
+            "userIds": ["u1", "u2"],
+            "names": ["Alice", "Bob"],
+        }
+    }
+
+    normalized = _tools._normalize_message(message)
+
+    assert normalized["files"] == [
+        {
+            "file_id": "f1",
+            "name": "report.pdf",
+            "content_type": "application/pdf",
+            "size": 42,
+        },
+        {
+            "file_id": "f2",
+            "name": "chart.png",
+            "content_type": "image/png",
+            "url": "/file-upload/f2/chart.png",
+        },
+    ]
+    assert normalized["reactions"] == [
+        {
+            "emoji": ":white_check_mark:",
+            "count": 2,
+            "usernames": ["alice.login", "bob"],
+            "user_ids": ["u1", "u2"],
+        }
+    ]
+
+
+class TestSearchMessagesTool:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("args", "expected_error"),
+        [
+            ({}, "room_id"),
+            ({"query": "deploy"}, "room_id"),
+            ({"room_id": "r1"}, "query"),
+            ({"room_id": "r1", "query": "   "}, "query"),
+        ],
+    )
+    async def test_requires_room_id_and_query(self, args, expected_error):
+        out = json.loads(await _tools.handle_search_messages(args))
+        assert expected_error in out["error"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "pagination",
+        [
+            {"count": 0},
+            {"count": 101},
+            {"count": "many"},
+            {"count": 1.5},
+            {"count": True},
+            {"offset": -1},
+            {"offset": "later"},
+            {"offset": 1.5},
+            {"offset": False},
+        ],
+    )
+    async def test_rejects_invalid_pagination(self, pagination):
+        args = {"room_id": "r1", "query": "deploy", **pagination}
+        out = json.loads(await _tools.handle_search_messages(args))
+        assert "error" in out
+
+    @pytest.mark.asyncio
+    async def test_gets_paginated_results_and_normalizes_messages(
+        self, monkeypatch
+    ):
+        seen = {}
+
+        async def fake_api(method, path, **kw):
+            seen["call"] = (method, path, kw.get("params"))
+            return {
+                "messages": [
+                    _raw_tool_message("m1"),
+                    _raw_tool_message("m2", thread_id="thread-root"),
+                ],
+                "count": 2,
+                "total": 17,
+                "offset": 7,
+            }
+
+        monkeypatch.setattr(_tools, "_api", fake_api)
+        out = json.loads(await _tools.handle_search_messages({
+            "room_id": "r1",
+            "query": "deploy",
+            "count": 100,
+            "offset": 7,
+        }))
+
+        assert seen["call"] == (
+            "GET",
+            "chat.search",
+            {
+                "roomId": "r1",
+                "searchText": "deploy",
+                "count": 100,
+                "offset": 7,
+            },
+        )
+        assert out["room_id"] == "r1"
+        assert out["query"] == "deploy"
+        assert out["count"] == 2
+        assert out["total"] == 17
+        assert out["offset"] == 7
+        _assert_normalized_message(out["messages"][0], message_id="m1")
+        _assert_normalized_message(
+            out["messages"][1], message_id="m2", thread_id="thread-root"
+        )
+
+    @pytest.mark.asyncio
+    async def test_uses_default_pagination(self, monkeypatch):
+        seen = {}
+
+        async def fake_api(method, path, **kw):
+            seen.update(kw["params"])
+            return {"messages": []}
+
+        monkeypatch.setattr(_tools, "_api", fake_api)
+        out = json.loads(await _tools.handle_search_messages({
+            "room_id": "r1",
+            "query": "deploy",
+        }))
+
+        assert seen["count"] == 25
+        assert seen["offset"] == 0
+        assert out["messages"] == []
+        assert out["count"] == 0
+        assert out["total"] is None
+
+    @pytest.mark.asyncio
+    async def test_surfaces_api_error(self, monkeypatch):
+        async def fake_api(method, path, **kw):
+            return {"_error": "search-disabled"}
+
+        monkeypatch.setattr(_tools, "_api", fake_api)
+        out = json.loads(await _tools.handle_search_messages({
+            "room_id": "r1",
+            "query": "deploy",
+        }))
+        assert "search-disabled" in out["error"]
+
+
+class TestGetHistoryTool:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("raw_type", "endpoint", "room_type"),
+        [
+            ("c", "channels.history", "channel"),
+            ("p", "groups.history", "group"),
+            ("d", "im.history", "dm"),
+        ],
+    )
+    async def test_maps_room_type_to_history_endpoint(
+        self, raw_type, endpoint, room_type, monkeypatch
+    ):
+        calls = []
+
+        async def fake_api(method, path, **kw):
+            calls.append((method, path, kw.get("params")))
+            if path == "rooms.info":
+                return {"room": {"_id": "r1", "t": raw_type}}
+            assert path == endpoint
+            return {
+                "messages": [_raw_tool_message("m1")],
+                "count": 1,
+                "total": 9,
+                "offset": 4,
+            }
+
+        monkeypatch.setattr(_tools, "_api", fake_api)
+        out = json.loads(await _tools.handle_get_history({
+            "room_id": "r1",
+            "count": 10,
+            "offset": 4,
+        }))
+
+        assert calls[0] == (
+            "GET", "rooms.info", {"roomId": "r1"}
+        )
+        assert calls[1][0:2] == ("GET", endpoint)
+        assert calls[1][2]["roomId"] == "r1"
+        assert calls[1][2]["count"] == 10
+        assert calls[1][2]["offset"] == 4
+        assert calls[1][2]["showThreadMessages"] == "false"
+        assert out["room_type"] == room_type
+        assert out["count"] == 1
+        assert out["total"] == 9
+        assert out["offset"] == 4
+        _assert_normalized_message(out["messages"][0], message_id="m1")
+
+    @pytest.mark.asyncio
+    async def test_does_not_invent_total_when_endpoint_omits_metadata(
+        self, monkeypatch
+    ):
+        async def fake_api(method, path, **kw):
+            if path == "rooms.info":
+                return {"room": {"_id": "r1", "t": "c"}}
+            return {"messages": [_raw_tool_message("m1")]}
+
+        monkeypatch.setattr(_tools, "_api", fake_api)
+        out = json.loads(await _tools.handle_get_history({
+            "room_id": "r1",
+            "offset": 3,
+        }))
+
+        assert out["count"] == 1
+        assert out["total"] is None
+        assert out["offset"] == 3
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("raw_type", ["c", "p", "d"])
+    async def test_passes_history_filters_and_supported_thread_flag(
+        self, raw_type, monkeypatch
+    ):
+        seen = {}
+
+        async def fake_api(method, path, **kw):
+            if path == "rooms.info":
+                return {"room": {"_id": "r1", "t": raw_type}}
+            seen.update(kw["params"])
+            return {"messages": [], "total": 0}
+
+        monkeypatch.setattr(_tools, "_api", fake_api)
+        await _tools.handle_get_history({
+            "room_id": "r1",
+            "count": 100,
+            "offset": 8,
+            "oldest": " 2026-07-01T00:00:00.000Z ",
+            "latest": "2026-07-21T00:00:00.000Z",
+            "inclusive": True,
+            "include_threads": True,
+        })
+
+        assert seen == {
+            "roomId": "r1",
+            "count": 100,
+            "offset": 8,
+            "oldest": "2026-07-01T00:00:00.000Z",
+            "latest": "2026-07-21T00:00:00.000Z",
+            "inclusive": "true",
+            "showThreadMessages": "true",
+        }
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "args",
+        [
+            {},
+            {"room_id": "r1", "count": 0},
+            {"room_id": "r1", "count": 101},
+            {"room_id": "r1", "offset": -1},
+            {"room_id": "r1", "offset": "later"},
+        ],
+    )
+    async def test_validates_arguments(self, args):
+        out = json.loads(await _tools.handle_get_history(args))
+        assert "error" in out
+
+    @pytest.mark.asyncio
+    async def test_rejects_unsupported_room_type(self, monkeypatch):
+        async def fake_api(method, path, **kw):
+            return {"room": {"_id": "r1", "t": "l"}}
+
+        monkeypatch.setattr(_tools, "_api", fake_api)
+        out = json.loads(await _tools.handle_get_history({"room_id": "r1"}))
+        assert "unsupported" in out["error"].lower()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("failing_path", ["rooms.info", "channels.history"])
+    async def test_surfaces_lookup_or_history_error(
+        self, failing_path, monkeypatch
+    ):
+        async def fake_api(method, path, **kw):
+            if path == failing_path:
+                return {"_error": f"{failing_path}-failed"}
+            return {"room": {"_id": "r1", "t": "c"}}
+
+        monkeypatch.setattr(_tools, "_api", fake_api)
+        out = json.loads(await _tools.handle_get_history({"room_id": "r1"}))
+        assert f"{failing_path}-failed" in out["error"]
+
+
+class TestGetThreadTool:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "args",
+        [
+            {},
+            {"tmid": "t1", "limit": 0},
+            {"tmid": "t1", "limit": 501},
+            {"tmid": "t1", "limit": "many"},
+            {"tmid": "t1", "limit": 1.5},
+        ],
+    )
+    async def test_validates_arguments(self, args):
+        out = json.loads(await _tools.handle_get_thread(args))
+        assert "error" in out
+
+    @pytest.mark.asyncio
+    async def test_fetches_parent_and_paginated_replies_deduped_and_sorted(
+        self, monkeypatch
+    ):
+        parent = _raw_tool_message(
+            "t1", timestamp="2026-07-21T10:00:00.000Z"
+        )
+        reply_early = _raw_tool_message(
+            "m1",
+            thread_id="t1",
+            timestamp="2026-07-21T10:01:00.000Z",
+        )
+        reply_middle = _raw_tool_message(
+            "m3",
+            thread_id="t1",
+            timestamp="2026-07-21T10:02:00.000Z",
+        )
+        reply_late = _raw_tool_message(
+            "m2",
+            thread_id="t1",
+            timestamp="2026-07-21T10:03:00.000Z",
+        )
+        reply_calls = []
+
+        async def fake_api(method, path, **kw):
+            params = kw.get("params")
+            if path == "chat.getMessage":
+                assert params == {"msgId": "t1"}
+                return {"message": parent}
+            assert path == "chat.getThreadMessages"
+            reply_calls.append(params)
+            if params["offset"] == 0:
+                return {
+                    "messages": [reply_late, parent],
+                    "count": 2,
+                    "offset": 0,
+                    "total": 4,
+                }
+            return {
+                "messages": [reply_early, reply_middle],
+                "count": 2,
+                "offset": 2,
+                "total": 4,
+            }
+
+        monkeypatch.setattr(_tools, "_api", fake_api)
+        out = json.loads(await _tools.handle_get_thread({
+            "tmid": "t1",
+            "limit": 3,
+        }))
+
+        assert [call["offset"] for call in reply_calls] == [0, 2]
+        assert all(call["tmid"] == "t1" for call in reply_calls)
+        assert reply_calls[0]["count"] == 3
+        assert reply_calls[1]["count"] == 2
+        assert out["thread_id"] == "t1"
+        assert out["parent"]["message_id"] == "t1"
+        assert [message["message_id"] for message in out["messages"]] == [
+            "t1", "m1", "m3", "m2",
+        ]
+        assert out["total_replies"] == 4
+        assert out["truncated"] is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("failure", "expected_error"),
+        [
+            ("parent_api", "parent-failed"),
+            ("parent_missing", "parent"),
+            ("replies_api", "replies-failed"),
+        ],
+    )
+    async def test_surfaces_parent_and_reply_errors(
+        self, failure, expected_error, monkeypatch
+    ):
+        async def fake_api(method, path, **kw):
+            if path == "chat.getMessage":
+                if failure == "parent_api":
+                    return {"_error": "parent-failed"}
+                if failure == "parent_missing":
+                    return {"message": {}}
+                return {"message": _raw_tool_message("t1")}
+            if failure == "replies_api":
+                return {"_error": "replies-failed"}
+            raise AssertionError("unexpected API call")
+
+        monkeypatch.setattr(_tools, "_api", fake_api)
+        out = json.loads(await _tools.handle_get_thread({"tmid": "t1"}))
+        assert expected_error in out["error"].lower()
+
+
+class TestGetPermalinkTool:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("raw_type", "room_name", "room_id", "path", "room_type"),
+        [
+            ("c", "R&D / Ops", "c1", "channel/R%26D%20%2F%20Ops", "channel"),
+            ("p", "Private / Ops", "g1", "group/Private%20%2F%20Ops", "group"),
+            ("d", "ignored-name", "dm room/1", "direct/dm%20room%2F1", "dm"),
+        ],
+    )
+    async def test_builds_encoded_permalink_for_each_room_type(
+        self, raw_type, room_name, room_id, path, room_type,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("ROCKETCHAT_URL", "https://rc.example.com/")
+        calls = []
+
+        async def fake_api(method, api_path, **kw):
+            calls.append((method, api_path, kw.get("params")))
+            if api_path == "chat.getMessage":
+                return {"message": {"_id": "m/1 ?", "rid": room_id}}
+            return {
+                "room": {
+                    "_id": room_id,
+                    "t": raw_type,
+                    "name": room_name,
+                }
+            }
+
+        monkeypatch.setattr(_tools, "_api", fake_api)
+        out = json.loads(await _tools.handle_get_permalink({
+            "message_id": "m/1 ?",
+        }))
+
+        assert calls == [
+            ("GET", "chat.getMessage", {"msgId": "m/1 ?"}),
+            ("GET", "rooms.info", {"roomId": room_id}),
+        ]
+        assert out == {
+            "message_id": "m/1 ?",
+            "room_id": room_id,
+            "room_type": room_type,
+            "permalink": (
+                f"https://rc.example.com/{path}?msg=m%2F1%20%3F"
+            ),
+        }
+
+    @pytest.mark.asyncio
+    async def test_requires_message_id(self):
+        out = json.loads(await _tools.handle_get_permalink({}))
+        assert "message_id" in out["error"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("failure", "expected_error"),
+        [
+            ("message_api", "message-failed"),
+            ("message_missing", "message"),
+            ("room_id_missing", "room"),
+            ("room_api", "room-failed"),
+            ("room_missing", "room"),
+            ("room_name_missing", "name"),
+            ("unsupported", "unsupported"),
+            ("url_missing", "rocketchat_url"),
+        ],
+    )
+    async def test_surfaces_missing_unsupported_and_api_errors(
+        self, failure, expected_error, monkeypatch
+    ):
+        async def fake_api(method, path, **kw):
+            if path == "chat.getMessage":
+                if failure == "message_api":
+                    return {"_error": "message-failed"}
+                if failure == "message_missing":
+                    return {"message": {}}
+                if failure == "room_id_missing":
+                    return {"message": {"_id": "m1"}}
+                return {"message": {"_id": "m1", "rid": "r1"}}
+
+            if failure == "room_api":
+                return {"_error": "room-failed"}
+            if failure == "room_missing":
+                return {"room": {}}
+            if failure == "room_name_missing":
+                return {"room": {"_id": "r1", "t": "c"}}
+            if failure == "unsupported":
+                return {"room": {"_id": "r1", "t": "l", "name": "live"}}
+            if failure == "url_missing":
+                return {
+                    "room": {"_id": "r1", "t": "c", "name": "general"}
+                }
+            raise AssertionError("unexpected API call")
+
+        monkeypatch.setattr(_tools, "_api", fake_api)
+        out = json.loads(await _tools.handle_get_permalink({
+            "message_id": "m1",
+        }))
+        assert expected_error in out["error"].lower()

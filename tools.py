@@ -1,4 +1,4 @@
-"""Agent tools: channel discovery/creation, direct messages, and file uploads.
+"""Agent tools for Rocket.Chat writes, uploads, and bounded message retrieval.
 
 Registered into the ``rocketchat`` toolset (see ``register()`` in
 ``__init__.py``), which the gateway auto-includes for Rocket.Chat
@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 from typing import Any, Dict, Optional
+from urllib.parse import quote
 
 from tools.registry import tool_error, tool_result
 
@@ -63,6 +64,404 @@ async def _api(
                 return data
     except Exception as exc:
         return {"_error": str(exc)}
+
+
+def _bounded_count_arg(
+    args: dict,
+    name: str,
+    *,
+    default: int,
+    maximum: int,
+) -> tuple[Optional[int], Optional[str]]:
+    """Parse a positive count/limit argument without silently clamping it."""
+    raw = args.get(name, default)
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return None, f"{name} must be an integer between 1 and {maximum}"
+    if raw < 1 or raw > maximum:
+        return None, f"{name} must be between 1 and {maximum}"
+    return raw, None
+
+
+def _offset_arg(args: dict, *, default: int = 0) -> tuple[Optional[int], Optional[str]]:
+    """Parse a non-negative pagination offset."""
+    raw = args.get("offset", default)
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return None, "offset must be a non-negative integer"
+    if raw < 0:
+        return None, "offset must be a non-negative integer"
+    return raw, None
+
+
+def _boolean_arg(
+    args: dict, name: str, *, default: bool = False
+) -> tuple[Optional[bool], Optional[str]]:
+    """Parse a JSON boolean argument without treating non-empty strings as true."""
+    raw = args.get(name, default)
+    if not isinstance(raw, bool):
+        return None, f"{name} must be a boolean"
+    return raw, None
+
+
+def _compact_file_metadata(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the useful, stable subset of Rocket.Chat file metadata."""
+    result = {
+        "file_id": raw.get("_id") or raw.get("id"),
+        "name": raw.get("name") or raw.get("title"),
+        "content_type": raw.get("type") or raw.get("contentType"),
+        "size": raw.get("size"),
+        "url": (
+            raw.get("url")
+            or raw.get("title_link")
+            or raw.get("image_url")
+            or raw.get("audio_url")
+            or raw.get("video_url")
+        ),
+    }
+    return {key: value for key, value in result.items() if value is not None}
+
+
+def _normalize_message(message: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize a Rocket.Chat message into a compact agent-facing shape."""
+    sender = message.get("u") or {}
+    normalized: Dict[str, Any] = {
+        "message_id": message.get("_id"),
+        "room_id": message.get("rid"),
+        "thread_id": message.get("tmid"),
+        "text": message.get("msg") or "",
+        "timestamp": message.get("ts"),
+        "updated_at": message.get("_updatedAt"),
+        "sender": {
+            "user_id": sender.get("_id"),
+            "username": sender.get("username"),
+            "name": sender.get("name"),
+        },
+        "type": message.get("t") or "message",
+    }
+
+    raw_files = message.get("files") or []
+    if isinstance(raw_files, dict):
+        raw_files = [raw_files]
+    elif not isinstance(raw_files, list):
+        raw_files = []
+    single_file = message.get("file")
+    if isinstance(single_file, dict):
+        raw_files = [single_file, *raw_files]
+
+    files = []
+    seen_files = set()
+    for raw_file in raw_files:
+        if not isinstance(raw_file, dict):
+            continue
+        metadata = _compact_file_metadata(raw_file)
+        if not metadata:
+            continue
+        dedup_key = (
+            metadata.get("file_id"),
+            metadata.get("name"),
+            metadata.get("url"),
+        )
+        if dedup_key in seen_files:
+            continue
+        seen_files.add(dedup_key)
+        files.append(metadata)
+    if files:
+        normalized["files"] = files
+
+    reactions = message.get("reactions")
+    if isinstance(reactions, dict):
+        compact_reactions = []
+        for emoji, details in reactions.items():
+            if not isinstance(details, dict):
+                continue
+            usernames = details.get("usernames") or []
+            user_ids = details.get("userIds") or []
+            if not isinstance(usernames, list):
+                usernames = []
+            if not isinstance(user_ids, list):
+                user_ids = []
+            reaction = {
+                "emoji": emoji,
+                "count": max(len(usernames), len(user_ids)),
+            }
+            if usernames:
+                reaction["usernames"] = usernames
+            if user_ids:
+                reaction["user_ids"] = user_ids
+            compact_reactions.append(reaction)
+        if compact_reactions:
+            normalized["reactions"] = compact_reactions
+    return normalized
+
+
+def _response_int(value: Any, fallback: int) -> int:
+    """Return integer pagination metadata, falling back on malformed responses."""
+    if isinstance(value, bool):
+        return fallback
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+_ROOM_TYPE_NAMES = {
+    "c": "channel",
+    "p": "group",
+    "d": "dm",
+}
+
+
+async def handle_search_messages(args: dict, **kw) -> str:
+    """Search messages in one room."""
+    room_id = str(args.get("room_id") or "").strip()
+    if not room_id:
+        return tool_error("room_id is required")
+    query = str(args.get("query") or "").strip()
+    if not query:
+        return tool_error("query is required")
+
+    count, error = _bounded_count_arg(args, "count", default=25, maximum=100)
+    if error:
+        return tool_error(error)
+    offset, error = _offset_arg(args)
+    if error:
+        return tool_error(error)
+
+    data = await _api(
+        "GET",
+        "chat.search",
+        params={
+            "roomId": room_id,
+            "searchText": query,
+            "count": count,
+            "offset": offset,
+        },
+    )
+    if "_error" in data:
+        return tool_error(f"Could not search room {room_id}: {data['_error']}")
+
+    raw_messages = data.get("messages") or []
+    messages = [
+        _normalize_message(message)
+        for message in raw_messages
+        if isinstance(message, dict)
+    ]
+    return tool_result(
+        room_id=room_id,
+        query=query,
+        messages=messages,
+        count=_response_int(data.get("count"), len(messages)),
+        # Current Rocket.Chat releases omit total/count/offset from chat.search.
+        # Preserve pagination metadata from versions that provide it, but do not
+        # invent a misleading total for versions that do not.
+        total=(
+            _response_int(data.get("total"), len(messages))
+            if data.get("total") is not None
+            else None
+        ),
+        offset=_response_int(data.get("offset"), offset),
+    )
+
+
+async def handle_get_history(args: dict, **kw) -> str:
+    """Return normalized message history for a channel, group, or DM."""
+    room_id = str(args.get("room_id") or "").strip()
+    if not room_id:
+        return tool_error("room_id is required")
+
+    count, error = _bounded_count_arg(args, "count", default=50, maximum=100)
+    if error:
+        return tool_error(error)
+    offset, error = _offset_arg(args)
+    if error:
+        return tool_error(error)
+    inclusive, error = _boolean_arg(args, "inclusive")
+    if error:
+        return tool_error(error)
+    include_threads, error = _boolean_arg(args, "include_threads")
+    if error:
+        return tool_error(error)
+
+    info = await _api("GET", "rooms.info", params={"roomId": room_id})
+    if "_error" in info:
+        return tool_error(f"Could not inspect room {room_id}: {info['_error']}")
+    room = info.get("room") or {}
+    room_type_code = str(room.get("t") or "").strip().lower()
+    endpoint = {
+        "c": "channels.history",
+        "p": "groups.history",
+        "d": "im.history",
+    }.get(room_type_code)
+    if not endpoint:
+        return tool_error(
+            f"Unsupported Rocket.Chat room type: {room_type_code or 'unknown'}"
+        )
+    params: Dict[str, Any] = {
+        "roomId": room_id,
+        "count": count,
+        "offset": offset,
+        "inclusive": "true" if inclusive else "false",
+        # groups.history defaults this to true while channels/im default it to
+        # false, so always send the value to keep one cross-room contract.
+        "showThreadMessages": "true" if include_threads else "false",
+    }
+    oldest = str(args.get("oldest") or "").strip()
+    latest = str(args.get("latest") or "").strip()
+    if oldest:
+        params["oldest"] = oldest
+    if latest:
+        params["latest"] = latest
+    data = await _api("GET", endpoint, params=params)
+    if "_error" in data:
+        return tool_error(f"Could not fetch history for {room_id}: {data['_error']}")
+
+    raw_messages = data.get("messages") or []
+    messages = [
+        _normalize_message(message)
+        for message in raw_messages
+        if isinstance(message, dict)
+    ]
+    return tool_result(
+        room_id=room_id,
+        room_type=_ROOM_TYPE_NAMES[room_type_code],
+        messages=messages,
+        count=_response_int(data.get("count"), len(messages)),
+        total=(
+            _response_int(data.get("total"), len(messages))
+            if data.get("total") is not None
+            else None
+        ),
+        offset=_response_int(data.get("offset"), offset),
+    )
+
+
+async def handle_get_thread(args: dict, **kw) -> str:
+    """Return a thread parent and paginated replies in chronological order."""
+    thread_id = str(args.get("tmid") or "").strip()
+    if not thread_id:
+        return tool_error("tmid is required")
+    limit, error = _bounded_count_arg(args, "limit", default=100, maximum=500)
+    if error:
+        return tool_error(error)
+
+    parent_data = await _api(
+        "GET", "chat.getMessage", params={"msgId": thread_id}
+    )
+    if "_error" in parent_data:
+        return tool_error(f"Could not fetch thread parent {thread_id}: {parent_data['_error']}")
+    raw_parent = parent_data.get("message") or {}
+    if not isinstance(raw_parent, dict) or not raw_parent.get("_id"):
+        return tool_error(f"Thread parent {thread_id} was not found")
+
+    parent = _normalize_message(raw_parent)
+    parent_id = raw_parent.get("_id")
+    seen_ids = {parent_id}
+    replies = []
+    page_offset = 0
+    total_hint: Optional[int] = None
+    last_page_size = 0
+
+    while len(replies) < limit:
+        page_size = min(100, limit - len(replies))
+        data = await _api(
+            "GET",
+            "chat.getThreadMessages",
+            params={
+                "tmid": thread_id,
+                "count": page_size,
+                "offset": page_offset,
+            },
+        )
+        if "_error" in data:
+            return tool_error(f"Could not fetch thread {thread_id}: {data['_error']}")
+
+        raw_page = data.get("messages") or []
+        if not isinstance(raw_page, list):
+            raw_page = []
+        last_page_size = len(raw_page)
+        if data.get("total") is not None:
+            total_hint = _response_int(data.get("total"), len(replies))
+
+        for raw_message in raw_page:
+            if not isinstance(raw_message, dict):
+                continue
+            message_id = raw_message.get("_id")
+            if message_id and message_id in seen_ids:
+                continue
+            if message_id:
+                seen_ids.add(message_id)
+            replies.append(_normalize_message(raw_message))
+            if len(replies) >= limit:
+                break
+
+        if not raw_page:
+            break
+        page_offset += len(raw_page)
+        if total_hint is not None and page_offset >= total_hint:
+            break
+        if total_hint is None and len(raw_page) < page_size:
+            break
+
+    replies.sort(key=lambda message: str(message.get("timestamp") or ""))
+    # Keep the root first even if a malformed reply has an earlier/missing ts.
+    messages = [parent, *replies]
+    total_replies = total_hint if total_hint is not None else len(replies)
+    truncated = total_replies > len(replies)
+    if total_hint is None and len(replies) >= limit and last_page_size:
+        truncated = True
+
+    return tool_result(
+        thread_id=thread_id,
+        parent=parent,
+        messages=messages,
+        total_replies=total_replies,
+        truncated=truncated,
+    )
+
+
+async def handle_get_permalink(args: dict, **kw) -> str:
+    """Build a Rocket.Chat web permalink for one message."""
+    message_id = str(args.get("message_id") or "").strip()
+    if not message_id:
+        return tool_error("message_id is required")
+
+    data = await _api("GET", "chat.getMessage", params={"msgId": message_id})
+    if "_error" in data:
+        return tool_error(f"Could not fetch message {message_id}: {data['_error']}")
+    message = data.get("message") or {}
+    room_id = str(message.get("rid") or "").strip()
+    if not room_id:
+        return tool_error(f"Message {message_id} returned no room id")
+
+    info = await _api("GET", "rooms.info", params={"roomId": room_id})
+    if "_error" in info:
+        return tool_error(f"Could not inspect room {room_id}: {info['_error']}")
+    room = info.get("room") or {}
+    room_type_code = str(room.get("t") or "").strip().lower()
+    room_type = _ROOM_TYPE_NAMES.get(room_type_code)
+    if not room_type:
+        return tool_error(
+            f"Unsupported Rocket.Chat room type: {room_type_code or 'unknown'}"
+        )
+
+    if room_type_code in {"c", "p"}:
+        room_name = str(room.get("name") or "").strip()
+        if not room_name:
+            return tool_error(f"Room {room_id} returned no name")
+        route = "channel" if room_type_code == "c" else "group"
+        path = f"/{route}/{quote(room_name, safe='')}"
+    else:
+        path = f"/direct/{quote(room_id, safe='')}"
+
+    base_url = os.getenv("ROCKETCHAT_URL", "").rstrip("/")
+    if not base_url:
+        return tool_error("ROCKETCHAT_URL is required to build a permalink")
+    permalink = f"{base_url}{path}?msg={quote(message_id, safe='')}"
+    return tool_result(
+        message_id=message_id,
+        room_id=room_id,
+        room_type=room_type,
+        permalink=permalink,
+    )
 
 
 async def handle_list_channels(args: dict, **kw) -> str:
@@ -375,6 +774,134 @@ LIST_CHANNELS_SCHEMA = {
     },
 }
 
+SEARCH_MESSAGES_SCHEMA = {
+    "name": "rocketchat_search_messages",
+    "description": (
+        "Search message text inside one Rocket.Chat room. Returns compact, "
+        "normalized messages with sender and thread metadata."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "room_id": {
+                "type": "string",
+                "description": "Exact Rocket.Chat room ID to search",
+            },
+            "query": {
+                "type": "string",
+                "description": "Text to search for in the room",
+            },
+            "count": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 100,
+                "default": 25,
+                "description": "Maximum results to return (default 25, max 100)",
+            },
+            "offset": {
+                "type": "integer",
+                "minimum": 0,
+                "default": 0,
+                "description": "Pagination offset (default 0)",
+            },
+        },
+        "required": ["room_id", "query"],
+    },
+}
+
+GET_HISTORY_SCHEMA = {
+    "name": "rocketchat_get_history",
+    "description": (
+        "Read recent message history from a Rocket.Chat channel, private group, "
+        "or DM. The room type is detected automatically."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "room_id": {
+                "type": "string",
+                "description": "Exact Rocket.Chat room ID",
+            },
+            "count": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 100,
+                "default": 50,
+                "description": "Maximum messages to return (default 50, max 100)",
+            },
+            "offset": {
+                "type": "integer",
+                "minimum": 0,
+                "default": 0,
+                "description": "Pagination offset (default 0)",
+            },
+            "oldest": {
+                "type": "string",
+                "description": "Optional oldest ISO timestamp accepted by Rocket.Chat",
+            },
+            "latest": {
+                "type": "string",
+                "description": "Optional latest ISO timestamp accepted by Rocket.Chat",
+            },
+            "inclusive": {
+                "type": "boolean",
+                "default": False,
+                "description": "Include messages exactly at oldest/latest boundaries",
+            },
+            "include_threads": {
+                "type": "boolean",
+                "default": False,
+                "description": "Include thread replies in channel, group, or DM history",
+            },
+        },
+        "required": ["room_id"],
+    },
+}
+
+GET_THREAD_SCHEMA = {
+    "name": "rocketchat_get_thread",
+    "description": (
+        "Read a bounded Rocket.Chat thread by root message ID. Returns the parent "
+        "plus deduplicated replies in chronological order and reports when the "
+        "result was truncated."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "tmid": {
+                "type": "string",
+                "description": "Thread root message ID",
+            },
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 500,
+                "default": 100,
+                "description": "Maximum replies to return (default 100, max 500)",
+            },
+        },
+        "required": ["tmid"],
+    },
+}
+
+GET_PERMALINK_SCHEMA = {
+    "name": "rocketchat_get_permalink",
+    "description": (
+        "Build a Rocket.Chat web permalink for a message after resolving its room "
+        "type and canonical room name."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "message_id": {
+                "type": "string",
+                "description": "Rocket.Chat message ID",
+            },
+        },
+        "required": ["message_id"],
+    },
+}
+
 CREATE_CHANNEL_SCHEMA = {
     "name": "rocketchat_create_channel",
     "description": (
@@ -517,6 +1044,10 @@ DM_SCHEMA = {
 
 TOOLS = (
     ("rocketchat_list_channels", LIST_CHANNELS_SCHEMA, handle_list_channels, "📋"),
+    ("rocketchat_search_messages", SEARCH_MESSAGES_SCHEMA, handle_search_messages, "🔎"),
+    ("rocketchat_get_history", GET_HISTORY_SCHEMA, handle_get_history, "📜"),
+    ("rocketchat_get_thread", GET_THREAD_SCHEMA, handle_get_thread, "🧵"),
+    ("rocketchat_get_permalink", GET_PERMALINK_SCHEMA, handle_get_permalink, "🔗"),
     ("rocketchat_create_channel", CREATE_CHANNEL_SCHEMA, handle_create_channel, "➕"),
     ("rocketchat_post", POST_SCHEMA, handle_post, "📣"),
     ("rocketchat_send_file", SEND_FILE_SCHEMA, handle_send_file, "📎"),

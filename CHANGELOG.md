@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.3.0] - 2026-07-21
+
+### Added
+
+- Four read-only agent tools: `rocketchat_search_messages`,
+  `rocketchat_get_history`, `rocketchat_get_thread`, and
+  `rocketchat_get_permalink`.
+- Exact-`room_id` message search and bounded room-history retrieval with
+  pagination and optional time-window filters.
+- Compact normalized thread output with the root message fetched separately
+  from its replies.
+- Stable, URL-encoded message permalinks for public channels, private groups,
+  and direct-message rooms.
+
+### Documentation
+
+- Expanded the agent-tool reference from five to nine tools with business use
+  cases, required permissions, parameters, pagination limits, and examples.
+
 ## [1.2.0] - 2026-07-20
 
 ### Added
@@ -28,4 +47,5 @@
 Thanks to [@YounesAmalou](https://github.com/YounesAmalou) for the original
 implementation in [PR #1](https://github.com/HalfbitStudio/hermes-plugin-rocketchat/pull/1).
 
+[1.3.0]: https://github.com/HalfbitStudio/hermes-plugin-rocketchat/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/HalfbitStudio/hermes-plugin-rocketchat/compare/v1.1.1...v1.2.0
