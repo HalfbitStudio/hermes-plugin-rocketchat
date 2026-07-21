@@ -178,21 +178,25 @@ notice. It does not configure a delivery target or change cron routing.
 | Setup wizard | ✅ `hermes gateway setup` |
 | Plugin discovery | ✅ Auto-discover via `kind: platform` |
 | Thread context | ✅ First mention in a thread pulls in prior thread messages |
-| Agent tools | ✅ Channel listing/creation, cross-room posts, DMs, and local file uploads (see below) |
+| Agent tools | ✅ Nine tools for room management, posting, uploads, DMs, search, history, threads, and permalinks (see below) |
 
 ---
 
 ## Agent Tools
 
-The plugin registers five Rocket.Chat tools the agent can call during a conversation:
+The plugin registers nine Rocket.Chat tools the agent can call during a conversation:
 
-| Tool | What it does | Bot permission needed |
-|------|--------------|-----------------------|
-| `rocketchat_list_channels` | List channels/private groups with `room_id`, topic, member count | `view-c-room` for public channels; private groups only where the bot is a member |
-| `rocketchat_create_channel` | Create a public channel or private group and invite members | `create-c` / `create-p` |
-| `rocketchat_post` | Post a message to any channel/group by name (`#reports`) or `room_id` | bot must be a room member |
-| `rocketchat_send_file` | Upload a local file to a channel/group, DM, or thread | bot must be able to post and upload files in the target room |
-| `rocketchat_dm` | Open a DM room with any user by username, optionally send a message immediately | — |
+| Tool | Business use case | Key parameters and pagination | Bot permission needed |
+|------|-------------------|-------------------------------|-----------------------|
+| `rocketchat_list_channels` | Discover delivery and retrieval targets | Optional `filter`; returns visible channel/group `room_id` values | `view-c-room` for public channels; private groups only where the bot is a member |
+| `rocketchat_create_channel` | Create a project, incident, or private working room | `name`; optional `private`, `members` | `create-c` / `create-p` |
+| `rocketchat_post` | Publish a result or hand-off to another room | `message` plus `channel` or exact `room_id` | bot must be a room member and able to post |
+| `rocketchat_send_file` | Deliver a report, export, or generated artifact | `file_path` plus exactly one of `room_id`, `username`, `channel`; optional `caption`, `file_name`, `tmid` | bot must be able to post and upload files in the target room |
+| `rocketchat_dm` | Open a private workflow or schedule a direct reminder | `username`; optional `message` | bot must be allowed to create/open DMs with the user |
+| `rocketchat_search_messages` | Find decisions, incidents, owners, or prior discussion inside one known room | `room_id`, `query`; `count` defaults to 25 (valid 1–100); `offset` defaults to 0 and must be non-negative | bot must be a room member with access to search/read its messages |
+| `rocketchat_get_history` | Summarize or audit a bounded slice of one room's timeline | `room_id`; `count` defaults to 50 (valid 1–100); `offset` defaults to 0 and must be non-negative; optional `oldest`, `latest`, `inclusive`; `include_threads` defaults to false | bot must be a room member with access to its history |
+| `rocketchat_get_thread` | Reconstruct a discussion before summarizing or acting on it | `tmid`; `limit` defaults to 100 (valid 1–500); the parent is fetched separately from the replies | bot must be able to read the parent message and its room |
+| `rocketchat_get_permalink` | Produce a stable link for an audit trail, ticket, or hand-off | `message_id` only; the tool resolves the room and route | bot must be able to read the message and room metadata |
 
 Combined with the built-in `cronjob` tool this enables natural flows like:
 
@@ -209,6 +213,54 @@ Thread context gives the agent the discussion, and `rocketchat_post` delivers th
 `rocketchat_send_file` accepts an absolute `file_path` on the machine running Hermes and exactly one target: a channel/private-group name, an exact `room_id`, or a real Rocket.Chat `username` (login, not display name). It can also set a displayed `file_name`, attach a `caption`, and post under a thread root using `tmid`. For DMs it opens or reuses the conversation and rejects an unresolved username before uploading. For scheduled or multi-step workflows, use the literal `room_id` returned by `rocketchat_dm` or `rocketchat_list_channels`; never derive one from a name.
 
 The tool reads a file that is already present on the Hermes host. Only grant Hermes access to trusted users, and keep sensitive files outside the agent's working paths. A 100 MiB local guard is enabled by default through `ROCKETCHAT_AGENT_FILE_MAX_BYTES`; Rocket.Chat and the reverse proxy can enforce lower limits.
+
+### Read-only retrieval examples
+
+Search is intentionally scoped to one literal room ID; it is not a workspace-wide
+discovery API:
+
+```json
+{"room_id": "GENERAL", "query": "deployment decision", "count": 25, "offset": 0}
+```
+
+Fetch a bounded history window, optionally including thread replies and using
+Rocket.Chat timestamps for the lower and upper bounds:
+
+```json
+{"room_id": "GENERAL", "count": 50, "offset": 0, "oldest": "2026-07-01T00:00:00.000Z", "latest": "2026-07-21T23:59:59.999Z", "inclusive": true, "include_threads": false}
+```
+
+For public channels, private groups, and DMs, `include_threads` maps to
+Rocket.Chat's `showThreadMessages` option. The plugin always sends the explicit
+boolean because Rocket.Chat's endpoint defaults differ by room type.
+
+Fetch a thread by its root message ID. `rocketchat_get_thread` retrieves the
+parent separately, then returns it with a bounded set of replies in chronological
+order:
+
+```json
+{"tmid": "threadRootMessageId", "limit": 100}
+```
+
+Build a permalink from a message ID without asking the agent to guess a room
+name or type:
+
+```json
+{"message_id": "messageId"}
+```
+
+`rocketchat_get_permalink` resolves the message with `chat.getMessage`, looks up
+its room with `rooms.info`, and URL-encodes every path component. Rocket.Chat
+room type `c` uses `/channel/<room.name>?msg=<message-id>`, type `p` uses
+`/group/<room.name>?msg=<message-id>`, and type `d` uses
+`/direct/<rid>?msg=<message-id>`.
+
+All retrieval tools return compact normalized message records rather than raw
+Rocket.Chat payloads. Increase `offset` to request another search/history page;
+the server may return fewer records than requested. Rocket.Chat releases differ
+in whether search/history responses include total pagination metadata, so
+`total` is `null` whenever the server omits it. Out-of-range counts/limits and
+negative offsets are rejected rather than silently clamped.
 
 ### Thread context
 
