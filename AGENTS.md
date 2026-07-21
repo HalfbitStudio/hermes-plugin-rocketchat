@@ -220,8 +220,11 @@ Tests live in `tests/test_adapter.py` and need a hermes-agent checkout
 
 ```bash
 git clone https://github.com/NousResearch/hermes-agent
-pip install pytest pytest-asyncio aiohttp pyyaml
-HERMES_AGENT_PATH=./hermes-agent pytest tests/ -q
+python -m pip install -e ./hermes-agent pytest pytest-asyncio aiohttp
+HERMES_AGENT_PATH=./hermes-agent python -m pytest tests/ -q
 ```
+
+The editable install is required: `HERMES_AGENT_PATH` adds the checkout to
+`sys.path`, but does not install Hermes runtime dependencies such as `requests`.
 
 Live test: DM the bot or @mention in a channel after config.

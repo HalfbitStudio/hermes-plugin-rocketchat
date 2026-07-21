@@ -1,8 +1,9 @@
-"""Put a hermes-agent checkout on sys.path so the adapter's imports resolve.
+"""Put the selected hermes-agent checkout on sys.path for adapter imports.
 
-hermes-agent is not distributed as a pip package — the adapter imports
-``gateway.*`` from the repo root. Set ``HERMES_AGENT_PATH`` to your checkout;
-defaults to ``../hermes-agent``.
+Tests import ``gateway.*`` directly from a Hermes source checkout. Set
+``HERMES_AGENT_PATH`` to that checkout; it defaults to ``../hermes-agent``.
+The checkout must also be installed with pip so Hermes runtime dependencies are
+available; this path setting alone does not install them.
 """
 
 import os

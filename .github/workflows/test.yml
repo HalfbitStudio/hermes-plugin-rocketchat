@@ -17,7 +17,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install pytest pytest-asyncio aiohttp pyyaml
-      - run: pytest tests/ -v
+          cache: pip
+          cache-dependency-path: hermes-agent/pyproject.toml
+      - name: Install Hermes and test dependencies
+        run: python -m pip install -e ./hermes-agent pytest pytest-asyncio aiohttp
+      - name: Run tests
+        run: python -m pytest tests/ -v
         env:
           HERMES_AGENT_PATH: ${{ github.workspace }}/hermes-agent

@@ -263,11 +263,13 @@ Tests need a hermes-agent checkout (the adapter imports `gateway.*` at runtime):
 
 ```bash
 git clone https://github.com/NousResearch/hermes-agent
-pip install pytest pytest-asyncio aiohttp pyyaml
-HERMES_AGENT_PATH=./hermes-agent pytest tests/ -v
+python -m pip install -e ./hermes-agent pytest pytest-asyncio aiohttp
+HERMES_AGENT_PATH=./hermes-agent python -m pytest tests/ -v
 ```
 
-`HERMES_AGENT_PATH` defaults to `../hermes-agent` when unset.
+Installing the checkout is required because importing `gateway.*` also imports
+Hermes' runtime dependencies. `HERMES_AGENT_PATH` only selects the source tree
+and defaults to `../hermes-agent` when unset.
 
 ---
 
