@@ -74,6 +74,7 @@ _plugin_media = sys.modules["rocketchat_plugin.media"]
 validate_server_url = _plugin_helpers.validate_server_url
 websocket_endpoint_matches = _plugin_helpers.websocket_endpoint_matches
 websocket_url = _plugin_helpers.websocket_url
+ws_heartbeat_seconds = _plugin_helpers.ws_heartbeat_seconds
 
 
 @pytest.fixture(autouse=True)
@@ -399,6 +400,49 @@ class TestAdapterInit:
         assert adapter._ws is None
         adapter._ddp_send.assert_not_awaited()
         adapter._ddp_method.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_ddp_connects_with_keepalive_heartbeat(self, monkeypatch):
+        """A half-open socket only becomes a reconnect if keepalive is armed."""
+        monkeypatch.delenv("ROCKETCHAT_WS_HEARTBEAT_SECONDS", raising=False)
+        adapter = _make_adapter()
+        ws = MagicMock()
+        ws._response.url = "wss://rc.example.com/websocket"
+        ws.__aiter__.return_value = []
+        adapter._session = MagicMock()
+        adapter._session.ws_connect = AsyncMock(return_value=ws)
+        adapter._ddp_send = AsyncMock()
+        adapter._ddp_method = AsyncMock()
+        adapter._ddp_sub = AsyncMock()
+
+        await adapter._ws_connect_and_listen()
+
+        assert adapter._session.ws_connect.call_args.kwargs["heartbeat"] == 30.0
+
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            (None, 30.0),
+            ("0", None),
+            ("45", 45.0),
+            ("45.5", 45.5),
+            ("  60  ", 60.0),
+            ("1", 5.0),
+            ("100000", 300.0),
+            ("-5", 30.0),
+            ("0.0", 30.0),
+            ("off", 30.0),
+            ("", 30.0),
+        ],
+    )
+    def test_ws_heartbeat_seconds_bounds(self, monkeypatch, raw, expected):
+        """Only a literal 0 disables the guard; garbage keeps the default."""
+        if raw is None:
+            monkeypatch.delenv("ROCKETCHAT_WS_HEARTBEAT_SECONDS", raising=False)
+        else:
+            monkeypatch.setenv("ROCKETCHAT_WS_HEARTBEAT_SECONDS", raw)
+
+        assert ws_heartbeat_seconds() == expected
 
     @pytest.mark.asyncio
     async def test_attachment_download_rejects_unsafe_path_segments_before_network(self):

@@ -50,6 +50,15 @@ _RECONNECT_BASE_DELAY = 2.0
 _RECONNECT_MAX_DELAY = 60.0
 _RECONNECT_JITTER = 0.2
 
+# WebSocket keepalive.  aiohttp sends a protocol-level PING every N seconds and
+# raises when the PONG does not arrive, which is the only thing that turns a
+# silently half-open socket back into a reconnect.  Without it the read loop
+# blocks forever and inbound traffic stops permanently while the process still
+# looks healthy.
+DEFAULT_WS_HEARTBEAT_SECONDS = 30.0
+MIN_WS_HEARTBEAT_SECONDS = 5.0
+MAX_WS_HEARTBEAT_SECONDS = 300.0
+
 # DDP protocol version. Rocket.Chat supports "1" across 7.x/8.x.
 _DDP_PROTOCOL_VERSION = "1"
 
@@ -133,6 +142,30 @@ def media_download_max_bytes() -> int:
     if value < 1:
         return DEFAULT_MEDIA_DOWNLOAD_MAX_BYTES
     return min(value, HARD_MEDIA_DOWNLOAD_MAX_BYTES)
+
+
+def ws_heartbeat_seconds() -> float | None:
+    """Return the DDP WebSocket keepalive interval in seconds.
+
+    ``None`` means aiohttp keepalive stays off, which is only reachable through
+    the literal value ``0``.  Every other invalid or out-of-range value keeps
+    the safe default rather than silently disabling the guard: a deployment
+    that fat-fingers this variable must not end up with the permanently silent
+    inbound stream this setting exists to prevent.
+    """
+    raw = os.getenv("ROCKETCHAT_WS_HEARTBEAT_SECONDS")
+    if raw is None:
+        return DEFAULT_WS_HEARTBEAT_SECONDS
+    stripped = raw.strip()
+    if stripped == "0":
+        return None
+    try:
+        value = float(stripped)
+    except (AttributeError, TypeError, ValueError):
+        return DEFAULT_WS_HEARTBEAT_SECONDS
+    if value <= 0:
+        return DEFAULT_WS_HEARTBEAT_SECONDS
+    return min(MAX_WS_HEARTBEAT_SECONDS, max(MIN_WS_HEARTBEAT_SECONDS, value))
 
 
 class MediaDownloadTooLarge(ValueError):

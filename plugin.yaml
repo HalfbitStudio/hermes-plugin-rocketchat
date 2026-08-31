@@ -1,7 +1,7 @@
 name: rocketchat-platform
 label: Rocket.Chat
 kind: platform
-version: 1.4.0
+version: 1.4.1
 description: >
   Rocket.Chat gateway adapter for Hermes Agent.
   Connects to a self-hosted Rocket.Chat instance via the REST API v1 for
@@ -108,6 +108,10 @@ optional_env:
   - name: ROCKETCHAT_AGENT_TOOLS_ALLOW_EXTERNAL
     description: "Allow enabled Rocket.Chat write tools from non-Rocket.Chat/contextless sessions (default: false)"
     prompt: "Allow write tools from external platforms? (true/false)"
+    password: false
+  - name: ROCKETCHAT_WS_HEARTBEAT_SECONDS
+    description: "DDP WebSocket keepalive interval in seconds, clamped to 5-300; only literal 0 disables it (default: 30)"
+    prompt: "WebSocket keepalive seconds (0 to disable)"
     password: false
   - name: ROCKETCHAT_ALLOW_INSECURE_HTTP
     description: "Allow a plain HTTP Rocket.Chat URL; use only on a trusted local network (default: false)"
