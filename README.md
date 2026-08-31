@@ -161,6 +161,7 @@ The adapter reconnects automatically (exponential backoff 2–60s), but a too-ag
 | `ROCKETCHAT_AGENT_WRITE_ALLOWED_ROOMS` | — | `""` | Exact room IDs eligible for cross-room writes; the requester must also be trusted |
 | `ROCKETCHAT_AGENT_WRITE_TRUSTED_USERS` | — | `""` | Exact user IDs allowed to perform privileged actions and cross-room writes |
 | `ROCKETCHAT_AGENT_TOOLS_ALLOW_EXTERNAL` | — | `false` | Permit enabled write tools to be called from a non-Rocket.Chat or contextless session |
+| `ROCKETCHAT_WS_HEARTBEAT_SECONDS` | — | `30` | DDP WebSocket keepalive interval in seconds (clamped 5–300). Only the literal value `0` disables keepalive; invalid values keep the default. Without it a half-open socket silently stops all inbound traffic. |
 | `ROCKETCHAT_ALLOW_INSECURE_HTTP` | — | `false` | Permit a plain HTTP server URL; only suitable for an isolated trusted network |
 | `ROCKETCHAT_AGENT_RESPONSE_MAX_BYTES` | — | `2097152` | Maximum JSON body for every Rocket.Chat REST response (2 MiB; accepted range 64 KiB–16 MiB) |
 | `ROCKETCHAT_AGENT_MAX_CONCURRENCY` | — | `4` | Maximum concurrent agent REST calls in this process |

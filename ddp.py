@@ -15,6 +15,7 @@ from .helpers import (
     _RECONNECT_MAX_DELAY,
     websocket_endpoint_matches,
     websocket_url,
+    ws_heartbeat_seconds,
 )
 
 logger = logging.getLogger(__name__)
@@ -95,7 +96,12 @@ class DdpTransportMixin:
         ws_url = websocket_url(self._base_url)
         logger.info("Rocket.Chat: DDP connecting to %s", ws_url)
 
-        self._ws = await self._session.ws_connect(ws_url, heartbeat=None)
+        # A half-open socket raises nothing: without keepalive the read loop
+        # below blocks forever, `_ws_loop` never reconnects, and inbound
+        # traffic stops for good while outbound REST keeps working.  The
+        # protocol-level PING is what converts that silence into an exception.
+        heartbeat = ws_heartbeat_seconds()
+        self._ws = await self._session.ws_connect(ws_url, heartbeat=heartbeat)
         response = getattr(self._ws, "_response", None)
         final_url = getattr(response, "url", None)
         if not websocket_endpoint_matches(ws_url, final_url):

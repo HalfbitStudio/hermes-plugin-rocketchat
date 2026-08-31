@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.4.1] - 2026-08-31
+
+### Fixed
+
+- DDP WebSocket keepalive is armed by default (`heartbeat=30`). Previously the
+  socket was opened with `heartbeat=None`, so a half-open connection raised
+  nothing: the read loop blocked forever, the reconnect loop in `_ws_loop()`
+  never fired, and inbound messages stopped permanently while outbound REST
+  kept working and the process looked healthy (upstream issue #3).
+
+### Added
+
+- `ROCKETCHAT_WS_HEARTBEAT_SECONDS` to tune the keepalive interval (clamped to
+  5–300 seconds). Only the literal value `0` disables the guard; invalid or
+  out-of-range values keep the safe default rather than silently disabling it.
+
 ## [1.4.0] - 2026-07-23
 
 ### Added
