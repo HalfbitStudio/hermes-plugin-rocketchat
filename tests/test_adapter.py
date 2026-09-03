@@ -899,6 +899,65 @@ class TestSend:
 
 
 # ---------------------------------------------------------------------------
+# Republished document frames
+# ---------------------------------------------------------------------------
+
+
+class TestRepublishDetection:
+    def test_ejson_date_parsed(self):
+        assert _plugin_helpers.parse_rocketchat_timestamp(
+            {"$date": 1788432317864}
+        ) == pytest.approx(1788432317.864)
+
+    def test_iso_strings_parsed(self):
+        zulu = _plugin_helpers.parse_rocketchat_timestamp(
+            "2026-09-03T10:45:17.864Z"
+        )
+        offset = _plugin_helpers.parse_rocketchat_timestamp(
+            "2026-09-03T12:45:17.864+02:00"
+        )
+        assert zulu == pytest.approx(offset)
+
+    @pytest.mark.parametrize(
+        "value", [None, "", "not-a-date", True, {"$date": "nope"}, []]
+    )
+    def test_unusable_values_yield_none(self, value):
+        assert _plugin_helpers.parse_rocketchat_timestamp(value) is None
+
+    def test_fresh_post_is_not_a_republish(self):
+        assert not _plugin_helpers.is_mutation_republish(
+            {"ts": {"$date": 1788432317864}, "_updatedAt": {"$date": 1788432317864}}
+        )
+
+    def test_attachment_update_stays_within_tolerance(self):
+        # A file upload updates the message document moments after posting it.
+        assert not _plugin_helpers.is_mutation_republish(
+            {"ts": {"$date": 1788432317864}, "_updatedAt": {"$date": 1788432318300}}
+        )
+
+    def test_thread_root_republish_detected(self):
+        # Real payload shape: every reply bumps the root's tcount/tlm, and
+        # Rocket.Chat resends the whole root document on stream-room-messages.
+        assert _plugin_helpers.is_mutation_republish(
+            {
+                "ts": "2026-09-03T10:45:17.864Z",
+                "_updatedAt": "2026-09-03T12:21:41.961Z",
+                "tcount": 55,
+                "editedAt": None,
+            }
+        )
+
+    def test_edited_message_detected(self):
+        assert _plugin_helpers.is_mutation_republish(
+            {"editedAt": {"$date": 1788432999000}}
+        )
+
+    def test_missing_timestamps_fall_through_to_dedup(self):
+        assert not _plugin_helpers.is_mutation_republish({"msg": "hello"})
+        assert not _plugin_helpers.is_mutation_republish("not-a-dict")
+
+
+# ---------------------------------------------------------------------------
 # Room types & topic endpoints
 # ---------------------------------------------------------------------------
 
@@ -1007,6 +1066,38 @@ class TestHandleMessage:
         await adapter._handle_message(_post())
         await adapter._handle_message(_post())
         assert adapter.handle_message.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_republished_thread_root_is_not_a_new_turn(self):
+        """The regression: an active thread's root is resent on every reply.
+
+        Once the id has aged out of the dedup cache, only the republish guard
+        stands between that frame and a second answer to the opening question.
+        """
+        adapter = _wired_adapter(room_type="group")
+        fresh = _post(
+            post_id="root1",
+            msg="@hermesbot wie ist der Stand?",
+            ts="2026-09-03T10:45:17.864Z",
+            _updatedAt="2026-09-03T10:45:17.864Z",
+        )
+        await adapter._handle_message(fresh)
+        assert adapter.handle_message.await_count == 1
+
+        adapter._dedup._seen.clear()  # emulate the dedup window elapsing
+        await adapter._handle_message(_post(
+            post_id="root1",
+            msg="@hermesbot wie ist der Stand?",
+            ts="2026-09-03T10:45:17.864Z",
+            _updatedAt="2026-09-03T12:21:41.961Z",
+            tcount=55,
+        ))
+        assert adapter.handle_message.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_dedup_window_outlives_a_working_conversation(self):
+        adapter = _wired_adapter()
+        assert adapter._dedup._ttl >= 60 * 60
 
     @pytest.mark.asyncio
     async def test_system_message_skipped(self):

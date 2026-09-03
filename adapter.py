@@ -20,6 +20,8 @@ from gateway.platforms.helpers import MessageDeduplicator
 
 from .ddp import DdpTransportMixin
 from .helpers import (
+    INBOUND_DEDUP_MAX_ENTRIES,
+    INBOUND_DEDUP_TTL_SECONDS,
     MAX_MESSAGE_LENGTH,
     _ROOM_TYPE_MAP,
     build_delegation_envelope,
@@ -100,8 +102,13 @@ class RocketchatAdapter(
             in {"1", "true", "yes", "on"}
         )
 
-        # Dedup cache.
-        self._dedup = MessageDeduplicator()
+        # Dedup cache.  The default 5-minute window is shorter than a working
+        # conversation; a republished message id must still be recognized
+        # hours later (see INBOUND_DEDUP_TTL_SECONDS).
+        self._dedup = MessageDeduplicator(
+            max_size=INBOUND_DEDUP_MAX_ENTRIES,
+            ttl_seconds=INBOUND_DEDUP_TTL_SECONDS,
+        )
 
         # One-shot bot-to-bot tasks. Replies in these DM rooms carry a
         # terminal result envelope so they cannot start another agent turn.

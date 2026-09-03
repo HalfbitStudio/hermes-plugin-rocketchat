@@ -62,11 +62,81 @@ MAX_WS_HEARTBEAT_SECONDS = 300.0
 # DDP protocol version. Rocket.Chat supports "1" across 7.x/8.x.
 _DDP_PROTOCOL_VERSION = "1"
 
+# Rocket.Chat publishes a whole message document on ``stream-room-messages``
+# for *every* mutation of that document, not only when it is first posted: a
+# thread reply bumps the root message's ``tcount``/``tlm``, a reaction or a pin
+# rewrites it, an edit changes its text.  The republished frame is
+# indistinguishable from a fresh post, so without a guard the root of a long
+# thread is ingested as a brand-new user turn over and over — and the agent
+# answers the opening question again in the middle of an unrelated topic.
+#
+# ``_updatedAt`` is the discriminator: a newly posted message arrives with
+# ``_updatedAt == ts``.  The tolerance covers the legitimate near-instant
+# updates Rocket.Chat performs on a genuinely new message (file attachments,
+# URL previews) and stays well below the inbound dedup window, so every
+# republish is caught by exactly one of the two guards and none slips between.
+REPUBLISH_TOLERANCE_SECONDS = 60.0
+
+# Dedup window for inbound message IDs.  The default (300s) is far shorter than
+# a working conversation, which is what let the republished thread root through
+# in the first place; a window longer than any single session closes that gap
+# even for republishes this module cannot classify.
+INBOUND_DEDUP_TTL_SECONDS = 6 * 60 * 60.0
+INBOUND_DEDUP_MAX_ENTRIES = 20_000
+
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _PERCENT_ESCAPE_RE = re.compile(r"%(?![0-9A-Fa-f]{2})")
 _DELEGATION_ENVELOPE_RE = re.compile(
     r"\A\[hermes-delegation:v1:(task|result):([0-9a-f]{32})\](?:\r?\n)?"
 )
+
+
+def parse_rocketchat_timestamp(value: Any) -> Optional[float]:
+    """Return a POSIX timestamp for a Rocket.Chat date field, else ``None``.
+
+    DDP frames carry EJSON dates (``{"$date": <epoch milliseconds>}``); the
+    REST API returns ISO 8601 strings.  Both shapes reach inbound handling.
+    """
+    if isinstance(value, dict):
+        value = value.get("$date")
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value) / 1000.0
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        try:
+            from datetime import datetime, timezone
+
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.timestamp()
+    return None
+
+
+def is_mutation_republish(post: Any) -> bool:
+    """Return whether *post* is a republished document rather than a new post.
+
+    See ``REPUBLISH_TOLERANCE_SECONDS`` for why Rocket.Chat resends messages
+    that nobody sent again.  Payloads that carry no usable timestamps are
+    reported as new posts — the inbound dedup cache is the second guard.
+    """
+    if not isinstance(post, dict):
+        return False
+    if post.get("editedAt"):
+        return True
+    posted_at = parse_rocketchat_timestamp(post.get("ts"))
+    updated_at = parse_rocketchat_timestamp(post.get("_updatedAt"))
+    if posted_at is None or updated_at is None:
+        return False
+    return (updated_at - posted_at) > REPUBLISH_TOLERANCE_SECONDS
 
 
 def build_delegation_envelope(kind: str, delegation_id: str, text: str) -> str:

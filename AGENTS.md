@@ -76,6 +76,16 @@ RC's `rooms.media` has no direct audio transcoding, so ffmpeg is required.
 - System messages filtered by `"t"` field (join/leave/role changes, etc.)
 - Reconnect: exponential backoff 2s–60s
 
+**The stream carries mutations, not just new posts.** Rocket.Chat republishes a
+whole message document whenever it changes — a thread reply bumps the root's
+`tcount`/`tlm`, a reaction (including the adapter's own ✅ completion marker),
+a pin or an edit rewrites it. The republished frame is shaped exactly like a
+fresh post; only `_updatedAt > ts` distinguishes it. `is_mutation_republish()`
+drops these in `_handle_message()` before dedup. Without that guard the root of
+a busy thread is re-ingested as a new user turn every time it falls out of the
+dedup window, and the agent answers the thread's opening question again in the
+middle of an unrelated conversation (see CHANGELOG 1.4.2).
+
 ### 6. Bidirectional Topic Sync Is Default Off
 
 With `ROCKETCHAT_TOPIC_SYNC=true`, Hermes session titles sync back to RC room topics via `dm.setTopic` (DMs) or

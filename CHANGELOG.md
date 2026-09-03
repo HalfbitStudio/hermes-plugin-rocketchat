@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.4.2] - 2026-09-03
+
+### Fixed
+
+- Republished message documents are no longer ingested as new user turns.
+  Rocket.Chat publishes a message on `stream-room-messages` for *every*
+  mutation of it, not only when it is posted: each thread reply bumps the
+  root message's `tcount`/`tlm`, and reactions (including the adapter's own
+  ✅ completion marker) rewrite it too. The frame is identical in shape to a
+  fresh post, so once the message id had aged out of the 5-minute dedup
+  window the root of an active thread was re-delivered as a brand-new
+  message — the agent answered the thread's opening question again, in the
+  middle of an unrelated topic. Verified in production: a root posted at
+  10:45 with `tcount=55` carried `_updatedAt` 12:21 and was re-ingested
+  seven times in 95 minutes.
+- The inbound dedup window is now 6 hours (was 5 minutes), so a message id
+  stays recognizable for longer than a working conversation even when a
+  republished frame carries no usable timestamps.
+
 ## [1.4.1] - 2026-08-31
 
 ### Fixed

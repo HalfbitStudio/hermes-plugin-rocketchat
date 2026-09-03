@@ -20,6 +20,7 @@ from gateway.platforms.base import MessageEvent, MessageType, ProcessingOutcome
 from .helpers import (
     MediaDownloadTooLarge,
     _ROOM_TYPE_MAP,
+    is_mutation_republish,
     is_valid_server_identifier,
     is_valid_url_path_identifier,
     media_download_max_bytes,
@@ -324,6 +325,15 @@ class InboundMixin:
 
         post_id = post.get("_id", "")
         if not is_valid_server_identifier(post_id):
+            return
+        # Rocket.Chat resends a message whenever its document changes — most
+        # often the root of an active thread, whose reply counter every single
+        # reply bumps.  Such a frame is not a new user turn.
+        if is_mutation_republish(post):
+            logger.debug(
+                "Rocket.Chat: ignored republished message (document mutation, "
+                "not a new post)"
+            )
             return
         if self._dedup.is_duplicate(post_id):
             return
