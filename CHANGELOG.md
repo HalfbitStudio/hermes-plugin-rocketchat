@@ -109,6 +109,10 @@ All notable changes to this plugin are documented here. The format follows
   `config.yaml` example, membership and object-storage notes, troubleshooting for rejected tokens
   and republished messages. `AGENTS.md` DDP section matches the frames the code sends.
 
+Audit, implementation, live verification, and documentation by
+[Andrew Vieyra](https://github.com/andrewvieyra) (<andrew@andrewvieyra.com>); republish
+diagnosis by [@immodigit](https://github.com/immodigit).
+
 ## [1.4.1] - 2026-08-31
 
 ### Fixed

@@ -368,6 +368,16 @@ against a disposable local workspace (Docker) or your own one is described in
   [#4](https://github.com/HalfbitStudio/hermes-plugin-rocketchat/pull/4),
   [#5](https://github.com/HalfbitStudio/hermes-plugin-rocketchat/pull/5) by
   [@immodigit](https://github.com/immodigit)
+- 1.5.0 audit and hardening by [Andrew Vieyra](https://github.com/andrewvieyra)
+  (<andrew@andrewvieyra.com>): API-conformance and security audit against the Rocket.Chat
+  docs and server source and the Hermes 0.21 adapter contract; the republish guard, DDP
+  login/subscription handling, off-loop inbound processing, stream room metadata, idempotent
+  reactions, `commands.run` and `im.create` fixes, object-storage redirects, UTF-16 splitting,
+  cron media, profile-scoped configuration with the credential lock and `config.yaml` bridge,
+  the admission model without `internal=True`; the split test suite, real-loader test, CI, ruff
+  configuration; the live smoke test with its disposable Rocket.Chat + MinIO stack; and this
+  documentation set (README, AGENTS.md, CHANGELOG, `docs/architecture.md`, SECURITY.md,
+  CONTRIBUTING.md).
 
 Published as a standalone repository per the
 [hermes-agent plugin policy](https://github.com/NousResearch/hermes-agent/blob/main/CONTRIBUTING.md).
