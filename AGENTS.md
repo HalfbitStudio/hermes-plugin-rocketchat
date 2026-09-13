@@ -186,5 +186,6 @@ regression in `_ws_loop` shows up as a hang, not a failure.
 ## History
 
 Ported from hermes-agent PRs #4637 (@meron1122), #14869 (@cyb0rgk1tty), #30463 (@HearthCore);
-file uploads from #1 (@YounesAmalou); keepalive and republish diagnosis from #4/#5 (@immodigit).
-Release notes: `CHANGELOG.md`.
+file uploads from #1 (@YounesAmalou); keepalive and republish diagnosis from #4/#5 (@immodigit);
+1.5.0 audit, hardening, smoke test and this documentation set by Andrew Vieyra (@andrewvieyra,
+andrew@andrewvieyra.com). Release notes: `CHANGELOG.md`.
