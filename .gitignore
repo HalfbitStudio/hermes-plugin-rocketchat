@@ -2,3 +2,8 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .claude/
+
+# local audit notes and tool caches
+.audit/
+.coverage
+.ruff_cache/

@@ -7,7 +7,6 @@ command routing).
 
 import importlib.util
 import json
-import os
 import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -77,32 +76,6 @@ websocket_url = _plugin_helpers.websocket_url
 ws_heartbeat_seconds = _plugin_helpers.ws_heartbeat_seconds
 
 
-@pytest.fixture(autouse=True)
-def _clean_rocketchat_env(monkeypatch):
-    for key in list(os.environ):
-        if key.startswith("ROCKETCHAT_"):
-            monkeypatch.delenv(key, raising=False)
-    # Agent-tool authorization uses task-local ContextVars and deliberately
-    # ignores the legacy process-global fallback. Give ordinary tests an
-    # explicit Rocket.Chat provenance; security tests override it as needed.
-    for key in (
-        "HERMES_SESSION_PLATFORM",
-        "HERMES_SESSION_CHAT_ID",
-        "HERMES_SESSION_USER_ID",
-        "HERMES_SESSION_THREAD_ID",
-        "HERMES_SESSION_KEY",
-    ):
-        monkeypatch.delenv(key, raising=False)
-    tokens = session_context.set_session_vars(
-        platform="rocketchat",
-        chat_id="r1",
-        user_id="u1",
-        session_key="rocketchat:r1",
-    )
-    yield
-    session_context.clear_session_vars(tokens)
-
-
 # ---------------------------------------------------------------------------
 # Platform enum
 # ---------------------------------------------------------------------------
@@ -122,24 +95,29 @@ class TestPlatformEnum:
 
 
 class TestRequirementsCheck:
-    def test_fails_without_anything(self):
-        assert check_requirements() is False
+    """``check_fn`` is a passive dependency probe; credentials are checked separately."""
 
-    def test_fails_without_token(self, monkeypatch):
-        monkeypatch.setenv("ROCKETCHAT_URL", "https://rc.example.com")
-        monkeypatch.setenv("ROCKETCHAT_USER_ID", "uid123")
-        assert check_requirements() is False
-
-    def test_fails_without_user_id(self, monkeypatch):
-        monkeypatch.setenv("ROCKETCHAT_URL", "https://rc.example.com")
-        monkeypatch.setenv("ROCKETCHAT_TOKEN", "my-pat")
-        assert check_requirements() is False
-
-    def test_passes_with_pat(self, monkeypatch):
-        monkeypatch.setenv("ROCKETCHAT_URL", "https://rc.example.com")
-        monkeypatch.setenv("ROCKETCHAT_TOKEN", "my-pat")
-        monkeypatch.setenv("ROCKETCHAT_USER_ID", "uid123")
+    def test_dependency_probe_ignores_configuration(self):
         assert check_requirements() is True
+
+    def test_credentials_missing(self):
+        assert _plugin_helpers.credentials_configured() is False
+
+    def test_credentials_without_token(self, monkeypatch):
+        monkeypatch.setenv("ROCKETCHAT_URL", "https://rc.example.com")
+        monkeypatch.setenv("ROCKETCHAT_USER_ID", "bot")
+        assert _plugin_helpers.credentials_configured() is False
+
+    def test_credentials_without_user_id(self, monkeypatch):
+        monkeypatch.setenv("ROCKETCHAT_URL", "https://rc.example.com")
+        monkeypatch.setenv("ROCKETCHAT_TOKEN", "pat")
+        assert _plugin_helpers.credentials_configured() is False
+
+    def test_credentials_complete(self, monkeypatch):
+        monkeypatch.setenv("ROCKETCHAT_URL", "https://rc.example.com")
+        monkeypatch.setenv("ROCKETCHAT_TOKEN", "pat")
+        monkeypatch.setenv("ROCKETCHAT_USER_ID", "bot")
+        assert _plugin_helpers.credentials_configured() is True
 
 
 class TestValidateConfig:
@@ -923,10 +901,11 @@ class TestRoomTypes:
         assert await adapter._resolve_room_type("r1") == "group"
 
     @pytest.mark.asyncio
-    async def test_missing_room_falls_back_to_channel(self):
+    async def test_missing_room_is_unknown_not_channel(self):
         adapter = _make_adapter()
         adapter._api_get = AsyncMock(return_value={})
-        assert await adapter._resolve_room_type("r1") == "channel"
+        assert await adapter._resolve_room_type("r1") is None
+        assert "r1" not in adapter._room_type_cache
         assert "r1" not in adapter._room_type_cache
 
     @pytest.mark.asyncio
@@ -1342,13 +1321,16 @@ class TestHandleMessage:
 
         await adapter._handle_message(_post(msg="/giphy cat"))
 
+        # The hook rewrote the command away, so nothing was forwarded to
+        # commands.run; the runner applies the same hook to the dispatched
+        # event, which is therefore not marked internal.
         adapter._api_post.assert_not_awaited()
         event = adapter.handle_message.await_args.args[0]
-        assert event.text == "safe text"
-        assert event.internal is True
+        assert event.text == "/giphy cat"
+        assert event.internal is False
 
     @pytest.mark.asyncio
-    async def test_unauthorized_dm_pairs_once_before_any_adapter_effect(self):
+    async def test_unauthorized_sender_gets_no_adapter_effects(self):
         class Runner:
             session_store = None
 
@@ -1362,7 +1344,6 @@ class TestHandleMessage:
         adapter = _wired_adapter(room_type="dm")
         adapter._inbound_authorization_checker = None
         adapter._message_handler = runner.dispatch
-        adapter._offer_central_pairing = AsyncMock()
         adapter._fetch_thread_context = AsyncMock()
 
         await adapter._handle_message(_post(
@@ -1371,11 +1352,17 @@ class TestHandleMessage:
             file={"_id": "file1", "name": "report.txt"},
         ))
 
-        adapter._offer_central_pairing.assert_awaited_once()
+        # No PAT-powered effect for a sender the runner will reject; the plain
+        # text is still dispatched so the runner's own pairing offer runs.
         adapter._api_post.assert_not_awaited()
         adapter._download_attachments.assert_not_awaited()
         adapter._fetch_thread_context.assert_not_awaited()
-        adapter.handle_message.assert_not_awaited()
+        adapter.handle_message.assert_awaited_once()
+        event = adapter.handle_message.await_args.args[0]
+        assert event.text == "/giphy cat"
+        assert not event.media_urls
+        assert event.channel_context is None
+        assert event.internal is False
 
     @pytest.mark.asyncio
     async def test_title_sync_is_default_off_and_requires_trusted_writer(
@@ -1485,10 +1472,12 @@ class TestThreadContext:
             tmid="t1",
             mentions=[{"_id": "bot_uid", "username": "hermesbot"}],
         ))
-        adapter._fetch_thread_context.assert_awaited_once_with("room1", "t1", "p1")
+        adapter._fetch_thread_context.assert_awaited_once_with(
+            "room1", "t1", "p1", chat_type="channel"
+        )
         event = adapter.handle_message.await_args[0][0]
-        assert event.text.startswith("[Thread context]")
-        assert event.text.rstrip().endswith("summarize")
+        assert event.channel_context.startswith("[Thread context]")
+        assert event.text == "summarize"
         assert event.source.thread_id == "t1"
 
     @pytest.mark.asyncio
@@ -1919,20 +1908,29 @@ class TestAgentTools:
 
     @pytest.mark.asyncio
     async def test_dm_without_message_returns_room_id(self, monkeypatch):
+        calls = []
+
         async def fake_api(method, path, **kw):
-            assert (method, path) == ("POST", "im.create")
-            assert kw["payload"] == {"username": "zed"}
+            calls.append((method, path))
+            if (method, path) == ("POST", "im.create"):
+                assert kw["payload"] == {"username": "zed"}
+                # The create response carries no uids/usersCount (createDirectRoom).
+                return {"room": {"_id": "dm42", "rid": "dm42", "t": "d", "usernames": ["hermesbot", "zed"], "inserted": True}}
+            assert (method, path) == ("GET", "rooms.info")
+            assert kw["params"] == {"roomId": "dm42"}
             return {
                 "room": {
                     "_id": "dm42",
                     "t": "d",
                     "usernames": ["hermesbot", "zed"],
                     "uids": ["bot-id", "zed-id"],
+                    "usersCount": 2,
                 }
             }
 
         monkeypatch.setattr(_tools, "_api", fake_api)
         out = json.loads(await _tools.handle_dm({"username": "@zed"}))
+        assert calls == [("POST", "im.create"), ("GET", "rooms.info")]
         assert out["room_id"] == "dm42"
         assert out["sent"] is False
         assert "rocketchat:dm42" in out["hint"]

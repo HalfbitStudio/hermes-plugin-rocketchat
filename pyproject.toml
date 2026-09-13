@@ -1,0 +1,15 @@
+# Not a pip-installable package: Hermes loads this directory as a plugin. This file only carries
+# tool configuration so `ruff` behaves the same locally and in CI.
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = [".audit"]
+
+[tool.ruff.lint]
+# Correctness-oriented rules only; formatting is not enforced so upstream diffs stay small.
+select = ["E9", "F", "B", "UP", "SIM"]
+ignore = ["B905", "UP007", "UP035", "UP006", "UP045", "SIM102", "SIM105", "SIM108", "SIM113", "SIM117"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B018"]

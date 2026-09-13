@@ -1,59 +1,64 @@
 # Rocket.Chat Plugin for Hermes Agent
 
-Connects Hermes Agent to a self-hosted Rocket.Chat instance via REST API v1 (outbound) and DDP WebSocket (inbound). Ships as a standalone plugin — zero changes to Hermes core files, no extra Python dependencies (uses `aiohttp`, already shipped with Hermes).
+Connects [Hermes Agent](https://hermes-agent.nousresearch.com/) to a self-hosted Rocket.Chat
+workspace: REST API v1 for everything the bot sends, the Realtime (DDP) WebSocket for everything
+it receives. Ships as a standalone plugin with no changes to Hermes core and no extra Python
+dependencies (`aiohttp` is already part of Hermes).
 
----
+[![CI](https://github.com/HalfbitStudio/hermes-plugin-rocketchat/actions/workflows/ci.yml/badge.svg)](https://github.com/HalfbitStudio/hermes-plugin-rocketchat/actions/workflows/ci.yml)
+![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)
+![License MIT](https://img.shields.io/badge/license-MIT-green)
+
+```
+alice   > @hermes-bot summarize this thread and post it to #reports
+hermes  > 👀
+hermes  > [rocketchat_get_thread]  12 replies, newest first
+hermes  > [rocketchat_post]        #reports: "Deploy thread summary: ..."
+hermes  > ✅ Posted the summary to #reports (message L9kq...).
+```
 
 ## Installation
 
 ```bash
 hermes plugins install HalfbitStudio/hermes-plugin-rocketchat
-```
-
-The installer clones this repo into `~/.hermes/plugins/rocketchat-platform/` and prompts you to enable it. If you skipped the prompt:
-
-```bash
 hermes plugins enable rocketchat-platform
 hermes gateway restart
 ```
 
-To update an existing installation:
+The installer clones this repository into `~/.hermes/plugins/rocketchat-platform/`. Update with
+`hermes plugins update rocketchat-platform` followed by a gateway restart.
 
-```bash
-hermes plugins update rocketchat-platform
-hermes gateway restart
-```
+Requirements: Hermes Agent 0.21 or newer, Python 3.11+, a Rocket.Chat 6.x, 7.x or 8.x workspace,
+and `ffmpeg` on the gateway host if voice messages should be transcribed.
 
----
+## Quick start
 
-## Quick Start
+### 1. Create the bot user
 
-### 1. Create a Bot on Rocket.Chat
+**Administration → Workspace → Users → New.** Give it a username (this is what people will
+@mention, e.g. `hermes-bot`), keep the default `user` role and add `bot`. Uncheck "Require
+password change" and skip the welcome email.
 
-1. Log into Rocket.Chat as admin
-2. Go to **Admin** → **Users** → **New**
-3. Set username to `hermes-bot`, role: `bot`
-4. Save
+The `bot` role marks the account visually and keeps it out of active-user counts; the `user`
+role is what carries the `create-personal-access-tokens` permission that the next step needs.
+If you prefer a `bot`-only account, grant that permission to the `bot` role under
+**Administration → Workspace → Permissions**.
 
 ### 2. Generate a Personal Access Token
 
-1. Log in as the bot user
-2. Go to **Account** → **Personal Access Tokens**
-3. Give it a name (e.g. `hermes-gateway`)
-4. **Check ☑ Ignore Two Factor Authentication** — this is critical
-5. Copy the **Token** and **User ID** right away — you won't see them again
+Log in **as the bot user**, open the avatar menu → **Profile → Personal Access Tokens**, name the
+token (e.g. `hermes-gateway`), tick **Ignore Two Factor Authentication**, and generate it. Copy
+the **token** and the **user ID** right away; both are shown only once.
 
-### 3. Configure
+### 3. Configure Hermes
 
-Either use the setup wizard:
+Either run the wizard:
 
 ```bash
 hermes gateway setup
 ```
 
-Select Rocket.Chat → enter URL, Token, and User ID when prompted.
-
-Or configure manually in `~/.hermes/.env`:
+or write the three required values into `~/.hermes/.env`:
 
 ```bash
 ROCKETCHAT_URL=https://rc.example.com
@@ -62,64 +67,53 @@ ROCKETCHAT_USER_ID=your_bot_user_id
 ROCKETCHAT_ALLOWED_USERS=your_user_id
 ```
 
-### 4. Restart the Gateway
+or put the same keys under `platforms.rocketchat` in `~/.hermes/config.yaml` (see
+[Configuration](#configuration)).
+
+### 4. Restart the gateway and say hello
 
 ```bash
-systemctl restart hermes-gateway
-# or via Telegram: /restart
+hermes gateway restart
 ```
 
----
+Send the bot a direct message. In channels, invite it first (`/invite @hermes-bot`) and
+@mention it.
 
 ## Configuring Rocket.Chat (server side)
 
-Everything the bot needs on the Rocket.Chat side, beyond the Quick Start basics.
-
-### Bot account
-
-Create a dedicated user for the bot (**Admin → Users → New**):
-
-- **Username**: e.g. `hermes-bot` — this is the name users will @mention
-- **Roles**: add `bot` (keeps the bot out of "active users" counts and marks it visually)
-- Uncheck **Require password change** and skip the welcome email
-- Optionally enable **Join default channels** if the bot should sit in your standard rooms
-
-### Personal Access Token
-
-Log in **as the bot user** (not as admin):
-
-1. **My Account → Personal Access Tokens**
-2. Name it (e.g. `hermes-gateway`) and **check ☑ Ignore Two Factor Authentication** — without this, REST calls fail with `totp-required` on 2FA-enforced servers
-3. Copy the **Token** and **User ID** immediately; they are shown only once
-
-If PAT creation is blocked, enable it under **Admin → Settings → Accounts → "Allow Personal Access Tokens"**.
-
 ### Room membership
 
-The bot only receives messages from rooms it is a **member** of (the DDP `__my_messages__` subscription covers exactly the bot's rooms). DMs work out of the box; for channels and private groups, invite it:
+The bot receives messages from the rooms it is a **member** of. Rocket.Chat's `__my_messages__`
+stream also carries every public channel the bot is allowed to *read*; those are ignored unless
+`ROCKETCHAT_REQUIRE_MEMBERSHIP=false`, so an invite is always the deliberate step. DMs need no
+setup.
 
-```
-/invite @hermes-bot
-```
-
-In channels the bot answers only when @mentioned (unless the room ID is in `ROCKETCHAT_FREE_RESPONSE_CHANNELS` or you set `ROCKETCHAT_REQUIRE_MENTION=false`). With `ROCKETCHAT_REPLY_MODE=thread`, only the first message needs the mention: replies inside that active Hermes thread are picked up automatically, while unrelated threads remain ignored.
+In channels and private groups the bot answers only when @mentioned (`@all` and `@here` do not
+count), unless the room ID is in `ROCKETCHAT_FREE_RESPONSE_CHANNELS` or
+`ROCKETCHAT_REQUIRE_MENTION=false`. With `ROCKETCHAT_REPLY_MODE=thread` only the first message of a
+conversation needs the mention; replies inside that thread are picked up automatically.
 
 ### Admin settings worth checking
 
 | Setting | Where | Why |
-|---------|-------|-----|
-| `Message_AllowUnrecognizedSlashCommand` → **on** | Admin → Settings → Message | RC Desktop/Browser clients swallow unknown `/` commands client-side, so Hermes commands like `/new` or `/status` never reach the server. Mobile clients are unaffected. Alternatively set the env var `OVERWRITE_SETTING_Message_AllowUnrecognizedSlashCommand=true` on the RC server. |
-| Rate Limiter | Admin → Settings → Rate Limiter | A busy bot can hit `429 Too Many Requests` on the REST API. Raise the API rate limits or exempt the bot's IP. |
-| `Message_MaxAllowedSize` | Admin → Settings → Message | The adapter chunks long replies at 5000 characters (RC's default). If you lowered this setting below 5000, long messages will be rejected. |
-| File Upload settings | Admin → Settings → File Upload | Agent file uploads follow the workspace's enabled/disabled state, MIME restrictions, maximum size, and the separate DM upload setting. Match the proxy body-size limit as well. |
+|---|---|---|
+| `Message_AllowUnrecognizedSlashCommand` → on | Administration → Settings → Message | Desktop and browser clients swallow unknown `/` commands client-side, so Hermes commands like `/new` or `/status` never reach the server. Mobile clients are unaffected. Alternative: `OVERWRITE_SETTING_Message_AllowUnrecognizedSlashCommand=true` in the server environment. |
+| Rate Limiter | Administration → Settings → Rate Limiter | A busy bot can hit `429`. The plugin retries once using the server's `Retry-After`; raise the limits or exempt the bot's IP for sustained load. |
+| `Message_MaxAllowedSize` | Administration → Settings → Message | Replies are split at 5000 UTF-16 code units, Rocket.Chat's default. If you lowered the setting, long replies are rejected. |
+| File Upload, storage type | Administration → Settings → File Upload | Uploads follow the workspace's enabled state, MIME restrictions and size limit. With Amazon S3 or Google Cloud Storage and "Proxy uploads" off, downloads redirect to a signed URL; the plugin follows that one hop without the token. For a LAN object store (MinIO on a private address) set `ROCKETCHAT_ALLOW_PRIVATE_FILE_REDIRECTS=true` or enable the proxy setting. |
+| `UI_Use_Real_Name` | Administration → Settings → Layout → User Interface | Read at connect time so the typing indicator uses the identity the server expects. |
 
 ### Permissions for topic sync (optional, default off)
 
-Set `ROCKETCHAT_TOPIC_SYNC=true` to mirror Hermes session titles to room topics (`dm.setTopic` / `channels.setTopic` / `groups.setTopic`). Setting a channel topic requires room-edit rights — make the bot **owner/moderator of the room**, or grant the `edit-room` permission to the `bot` role (**Admin → Permissions**). Leave it disabled when topic writes are not part of the workflow.
+`ROCKETCHAT_TOPIC_SYNC=true` mirrors Hermes session titles to room topics. Channel and group topics
+need room-edit rights (make the bot owner or moderator, or grant `edit-room` to its role). DM
+topics require the global `edit-room` permission, which non-admin accounts do not have; leave the
+feature off if that is not acceptable.
 
-### Reverse proxy (nginx / traefik)
+### Reverse proxy (nginx, traefik)
 
-The inbound stream is a long-lived WebSocket at `/websocket`. With nginx in front of RC, make sure it isn't killed by the default 60s read timeout:
+The inbound stream is a long-lived WebSocket at `/websocket`. Keep the proxy from closing it on
+its default idle timeout:
 
 ```nginx
 location /websocket {
@@ -131,349 +125,250 @@ location /websocket {
 }
 ```
 
-The adapter reconnects automatically (exponential backoff 2–60s), but a too-aggressive proxy timeout causes needless reconnect churn.
+The adapter sends protocol pings every 30 seconds and reconnects with backoff, so a short proxy
+timeout costs reconnect churn rather than messages.
 
----
+## Configuration
 
-## Environment Variables
+Every setting is an environment variable in `~/.hermes/.env`. The same keys, lower-cased and
+without the `ROCKETCHAT_` prefix, work under `platforms.rocketchat` in `config.yaml`; environment
+variables win when both are set.
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `ROCKETCHAT_URL` | ✅ | — | Server URL (e.g. `https://rc.example.com`); HTTPS is required by default |
-| `ROCKETCHAT_TOKEN` | ✅ | — | Personal Access Token (PAT) |
-| `ROCKETCHAT_USER_ID` | ✅ | — | Bot user `_id` |
-| `ROCKETCHAT_ALLOWED_USERS` | — | `""` | Comma-separated list of allowed user IDs |
-| `ROCKETCHAT_ALLOW_ALL_USERS` | — | `false` | Allow all users (dev only) |
-| `ROCKETCHAT_BOT_PEERS` | — | `""` | Comma-separated bot usernames or IDs used when Rocket.Chat omits bot metadata; ordinary messages from these peers are ignored, while explicit delegations are accepted |
-| `ROCKETCHAT_HOME_CHANNEL` | — | — | Room ID for cron / notification delivery |
-| `ROCKETCHAT_SUPPRESS_HOME_CHANNEL_NOTICE` | — | `false` | Suppress the one-time `/sethome` notice when no home channel is configured |
-| `ROCKETCHAT_REQUIRE_MENTION` | — | `true` | Require @mention to trigger in channels |
-| `ROCKETCHAT_FREE_RESPONSE_CHANNELS` | — | — | Room IDs where @mention is not required |
-| `ROCKETCHAT_REPLY_MODE` | — | `off` | `thread` keeps channel/group conversations, including clarification prompts, in one thread; `off` sends flat replies; DMs stay flat |
-| `ROCKETCHAT_AGENT_FILE_MAX_BYTES` | — | `104857600` | Local upload-size guard (100 MiB); only the literal value `0` disables it, while invalid/negative values retain the default |
-| `ROCKETCHAT_AGENT_FILE_UPLOADS` | — | `false` | Independently enable agent-triggered reads and uploads of local files |
-| `ROCKETCHAT_AGENT_FILE_ALLOWED_ROOTS` | — | `""` | Absolute directories from which the agent may upload files; separate roots with `:` on Unix/macOS. Secure local upload currently requires POSIX descriptor APIs and stays unavailable on Windows. |
-| `ROCKETCHAT_AGENT_FILE_MAX_CONCURRENCY` | — | `1` | Concurrent local file read/upload operations (accepted range 1–4) |
-| `ROCKETCHAT_RETRIEVAL_ALLOWED_ROOMS` | — | `""` | Comma-separated room IDs eligible for cross-room reads; each request must also come from a trusted user |
-| `ROCKETCHAT_RETRIEVAL_TRUSTED_USERS` | — | `""` | Comma-separated Rocket.Chat user IDs allowed to request a read outside the current room; the target must also be allowlisted |
-| `ROCKETCHAT_RETRIEVAL_ALLOW_CONTEXTLESS` | — | `false` | Permit retrieval without a verified Rocket.Chat session context; high-risk compatibility escape hatch |
-| `ROCKETCHAT_AGENT_WRITE_TOOLS` | — | `false` | Enable agent-callable channel creation, posting, file upload, and DM tools |
-| `ROCKETCHAT_AGENT_WRITE_ALLOWED_ROOMS` | — | `""` | Exact room IDs eligible for cross-room writes; the requester must also be trusted |
-| `ROCKETCHAT_AGENT_WRITE_TRUSTED_USERS` | — | `""` | Exact user IDs allowed to perform privileged actions and cross-room writes |
-| `ROCKETCHAT_AGENT_TOOLS_ALLOW_EXTERNAL` | — | `false` | Permit enabled write tools to be called from a non-Rocket.Chat or contextless session |
-| `ROCKETCHAT_WS_HEARTBEAT_SECONDS` | — | `30` | DDP WebSocket keepalive interval in seconds (clamped 5–300). Only the literal value `0` disables keepalive; invalid values keep the default. Without it a half-open socket silently stops all inbound traffic. |
-| `ROCKETCHAT_ALLOW_INSECURE_HTTP` | — | `false` | Permit a plain HTTP server URL; only suitable for an isolated trusted network |
-| `ROCKETCHAT_AGENT_RESPONSE_MAX_BYTES` | — | `2097152` | Maximum JSON body for every Rocket.Chat REST response (2 MiB; accepted range 64 KiB–16 MiB) |
-| `ROCKETCHAT_AGENT_MAX_CONCURRENCY` | — | `4` | Maximum concurrent agent REST calls in this process |
-| `ROCKETCHAT_AGENT_REQUESTS_PER_MINUTE` | — | `120` | Per-process request budget for agent REST calls |
-| `ROCKETCHAT_RETRIEVAL_REDACT_SECRETS` | — | `true` | Best-effort redaction of common token, credential, and private-key patterns in retrieved text |
-| `ROCKETCHAT_RETRIEVAL_INCLUDE_FILE_URLS` | — | `false` | Include attachment URLs in retrieval records |
-| `ROCKETCHAT_RETRIEVAL_INCLUDE_REACTION_IDENTITIES` | — | `false` | Include usernames associated with reactions |
-| `ROCKETCHAT_RETRIEVAL_INCLUDE_USER_IDS` | — | `false` | Include stable Rocket.Chat user IDs in normalized sender records |
-| `ROCKETCHAT_RETRIEVAL_MAX_RESULT_CHARS` | — | `75000` | Maximum serialized retrieval result (accepted range 4,096–500,000 chars); whole records/text are truncated safely and the result is marked `truncated` |
-| `ROCKETCHAT_THREAD_CONTEXT_MAX_CHARS` | — | `20000` | Maximum untrusted thread-history context added to one inbound turn (4,096–100,000 chars) |
-| `ROCKETCHAT_MEDIA_DOWNLOAD_MAX_BYTES` | — | `104857600` | Total inbound attachment budget per event and outbound URL-media body limit; cannot exceed the 1 GiB hard cap |
-| `ROCKETCHAT_FORWARDED_SLASH_COMMANDS` | — | `""` | Exact RC-native slash commands trusted writers may forward through `commands.run`; wildcards are rejected |
-| `ROCKETCHAT_TOPIC_SYNC` | — | `false` | Enable Hermes-title and trusted `/title` writes to Rocket.Chat room topics |
-
-Setting `ROCKETCHAT_SUPPRESS_HOME_CHANNEL_NOTICE=true` only hides the onboarding
-notice. It does not configure a delivery target or change cron routing.
-
-### Secure agent-tool defaults
-
-Rocket.Chat authorizes API calls as the bot account, not as the human who asked
-Hermes to call a tool. The plugin therefore applies a second authorization layer
-before room data is returned to the agent (and before directly room-targeted
-search/history calls reach Rocket.Chat):
-
-- A retrieval call from a verified Rocket.Chat conversation may read only that
-  conversation's current room by default. Thread and permalink calls authorize
-  the supplied `room_id` (or current session room) before looking up an opaque
-  `tmid`/`message_id`, then reject the response unless its `_id` and `rid`
-  match. A cross-room call must therefore include its expected `room_id`.
-- A cross-room read succeeds only when **both** the target room appears in
-  `ROCKETCHAT_RETRIEVAL_ALLOWED_ROOMS` **and** the requesting user's stable ID
-  appears in `ROCKETCHAT_RETRIEVAL_TRUSTED_USERS`. Setting only one list grants
-  nothing.
-- Retrieval from a contextless-style runtime (`cli`, `local`, `cron`, or an empty
-  platform value) is rejected unless
-  `ROCKETCHAT_RETRIEVAL_ALLOW_CONTEXTLESS=true`; even then, the resolved room
-  must be an exact member of `ROCKETCHAT_RETRIEVAL_ALLOWED_ROOMS`. Wildcards
-  are never accepted. Read calls from every other named non-Rocket.Chat
-  platform are denied.
-- Mutating tools are a separate capability and remain disabled until
-  `ROCKETCHAT_AGENT_WRITE_TOOLS=true`. They still require a Rocket.Chat runtime
-  context with non-empty task-local room and requester IDs. Current-room posts
-  are allowed after that opt-in; cross-room writes require both an exact
-  `ROCKETCHAT_AGENT_WRITE_ALLOWED_ROOMS` match and the requester in
-  `ROCKETCHAT_AGENT_WRITE_TRUSTED_USERS`. Channel creation, DM creation, name
-  resolution, and host-file access always require a trusted requester.
-  Contextless or non-Rocket.Chat writes additionally require
-  `ROCKETCHAT_AGENT_TOOLS_ALLOW_EXTERNAL=true`. Enabling reads does not silently
-  enable channel creation, posting, uploads, or DMs.
-- Local file upload is a third, narrower capability. `rocketchat_send_file`
-  remains unavailable until write tools, `ROCKETCHAT_AGENT_FILE_UPLOADS=true`,
-  and at least one absolute `ROCKETCHAT_AGENT_FILE_ALLOWED_ROOTS` entry are all
-  configured. Requested paths must be below a configured root and cannot use
-  traversal or symlinks. The same checks apply to model-emitted `MEDIA:` local
-  paths, so that delivery path cannot bypass the file-upload capability.
-- RC-native slash forwarding and topic writes are independent, default-off
-  capabilities. Forwarding requires an exact command in
-  `ROCKETCHAT_FORWARDED_SLASH_COMMANDS`, write tools enabled, and an exact
-  trusted requester; `ROCKETCHAT_TOPIC_SYNC=true` is additionally required for
-  topic changes.
-
-Authorization uses Hermes' task-local session context. Legacy process-global
-`HERMES_SESSION_*` variables are deliberately ignored, so stale values from a
-different request cannot grant room or requester authority.
-
-For example, this permits Alice to research `GENERAL` from a different
-Rocket.Chat room, while giving no such authority to other users and leaving all
-write tools disabled:
-
-```bash
-ROCKETCHAT_RETRIEVAL_ALLOWED_ROOMS=GENERAL
-ROCKETCHAT_RETRIEVAL_TRUSTED_USERS=aliceRocketChatUserId
-ROCKETCHAT_AGENT_WRITE_TOOLS=false
-ROCKETCHAT_AGENT_TOOLS_ALLOW_EXTERNAL=false
+```yaml
+platforms:
+  rocketchat:
+    url: https://rc.example.com
+    token: your_pat_token
+    user_id: your_bot_user_id
+    allowed_users: [aliceUserId, bobUserId]
+    reply_mode: thread
+    free_response_channels: [GENERAL]
+    home_channel: GENERAL
+    agent_write_tools: true
+    agent_write_trusted_users: [aliceUserId]
 ```
 
-The defaults also omit file URLs, reaction identities, and stable sender IDs;
-apply heuristic secret redaction; enforce a serialized result budget; reject
-oversized API bodies; and bound request rate and concurrency. The adapter does
-not follow REST redirects, so the PAT cannot be forwarded to a redirect target.
-Plain HTTP is rejected unless `ROCKETCHAT_ALLOW_INSECURE_HTTP=true`.
+### Connection and identity
 
-Retrieved messages are marked as untrusted content. Secret redaction and prompt
-framing reduce accidental disclosure and instruction-following, but they cannot
-prove that stored chat text is safe: a message can still contain a convincing
-prompt injection. Keep write tools disabled for research-only deployments,
-require human review for consequential actions, and never treat retrieved text
-as policy or tool instructions.
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `ROCKETCHAT_URL` | yes | | Server URL, HTTPS unless `ROCKETCHAT_ALLOW_INSECURE_HTTP=true` |
+| `ROCKETCHAT_TOKEN` | yes | | Personal Access Token of the bot user |
+| `ROCKETCHAT_USER_ID` | yes | | Bot user `_id` |
+| `ROCKETCHAT_ALLOW_INSECURE_HTTP` | | `false` | Permit a plain HTTP URL on an isolated network |
+| `ROCKETCHAT_WS_HEARTBEAT_SECONDS` | | `30` | DDP keepalive interval, clamped 5–300; only the literal `0` disables it |
+| `ROCKETCHAT_INBOUND_MAX_CONCURRENCY` | | `8` | Inbound messages processed concurrently (1–64); one room at a time |
 
-Use a dedicated bot account with the minimum Rocket.Chat permissions and room
-memberships required for the workflow; never use an administrator PAT. Protect
-the PAT as a secret, rotate it, keep the bot out of rooms it does not need, and
-monitor authorization denials, throttling, and unusual retrieval volume in the
-gateway logs. Application allowlists complement Rocket.Chat membership—they do
-not replace least privilege at the server.
+### Who may talk to the bot
 
----
+| Variable | Default | Description |
+|---|---|---|
+| `ROCKETCHAT_ALLOWED_USERS` | `""` | Comma-separated Rocket.Chat user IDs |
+| `ROCKETCHAT_ALLOW_ALL_USERS` | `false` | Allow every user (development only) |
+| `ROCKETCHAT_BOT_PEERS` | `""` | Bot usernames or IDs for servers that omit bot metadata; ordinary messages from them are ignored, delegation tasks are accepted |
+| `ROCKETCHAT_REQUIRE_MENTION` | `true` | Require an @mention in channels and private groups |
+| `ROCKETCHAT_REQUIRE_MEMBERSHIP` | `true` | Ignore public rooms the bot has not joined |
+| `ROCKETCHAT_FREE_RESPONSE_CHANNELS` | `""` | Room IDs exempt from the mention requirement |
+
+### Conversation behaviour
+
+| Variable | Default | Description |
+|---|---|---|
+| `ROCKETCHAT_REPLY_MODE` | `off` | `thread` keeps channel and group conversations, including clarification prompts, in one thread; DMs always stay flat |
+| `ROCKETCHAT_REACTIONS` | `true` | 👀 while working, ✅ or ❌ when done, on the triggering message |
+| `ROCKETCHAT_THREAD_CONTEXT_MAX_CHARS` | `20000` | Thread history added to the bot's first turn in a thread (4 096–100 000) |
+| `ROCKETCHAT_TOPIC_SYNC` | `false` | Mirror Hermes session titles to room topics and accept trusted `/title` writes |
+| `ROCKETCHAT_HOME_CHANNEL` | | Room ID for cron and notification delivery |
+| `ROCKETCHAT_HOME_CHANNEL_NAME` | room ID | Display name for the home channel in status output |
+| `ROCKETCHAT_SUPPRESS_HOME_CHANNEL_NOTICE` | `false` | Hide the one-time `/sethome` notice; changes no routing |
+| `ROCKETCHAT_FORWARDED_SLASH_COMMANDS` | `""` | Exact Rocket.Chat-native commands trusted writers may forward through `commands.run` |
+| `ROCKETCHAT_MEDIA_DOWNLOAD_MAX_BYTES` | `104857600` | Inbound attachment budget per message and outbound URL-media limit (hard cap 1 GiB) |
+| `ROCKETCHAT_ALLOW_PRIVATE_FILE_REDIRECTS` | `false` | Follow attachment redirects to non-public hosts (LAN object storage) |
+
+### Agent tools
+
+| Variable | Default | Description |
+|---|---|---|
+| `ROCKETCHAT_AGENT_WRITE_TOOLS` | `false` | Enable `rocketchat_create_channel`, `rocketchat_post`, `rocketchat_send_file`, `rocketchat_dm`, `rocketchat_delegate` |
+| `ROCKETCHAT_AGENT_WRITE_ALLOWED_ROOMS` | `""` | Exact room IDs eligible for cross-room writes; requester must also be trusted |
+| `ROCKETCHAT_AGENT_WRITE_TRUSTED_USERS` | `""` | User IDs allowed to create rooms, open DMs, resolve names, forward commands, write topics, and write cross-room |
+| `ROCKETCHAT_AGENT_TOOLS_ALLOW_EXTERNAL` | `false` | Allow write tools from non-Rocket.Chat or contextless sessions |
+| `ROCKETCHAT_AGENT_FILE_UPLOADS` | `false` | Enable host-file uploads (`rocketchat_send_file` and model-emitted `MEDIA:` paths) |
+| `ROCKETCHAT_AGENT_FILE_ALLOWED_ROOTS` | `""` | Absolute directories files may come from, `:`-separated; POSIX only |
+| `ROCKETCHAT_AGENT_FILE_MAX_BYTES` | `104857600` | Local size guard; only the literal `0` disables it |
+| `ROCKETCHAT_AGENT_FILE_MAX_CONCURRENCY` | `1` | Concurrent file read/upload operations (1–4) |
+| `ROCKETCHAT_RETRIEVAL_ALLOWED_ROOMS` | `""` | Exact room IDs readable outside the current room; requester must also be trusted |
+| `ROCKETCHAT_RETRIEVAL_TRUSTED_USERS` | `""` | User IDs allowed to read the allowlisted rooms |
+| `ROCKETCHAT_RETRIEVAL_ALLOW_CONTEXTLESS` | `false` | Allow reads without a Rocket.Chat session context, still limited to allowlisted rooms |
+| `ROCKETCHAT_RETRIEVAL_MAX_RESULT_CHARS` | `75000` | Serialized tool result budget (4 096–500 000); whole records are dropped and `truncated` set |
+| `ROCKETCHAT_RETRIEVAL_REDACT_SECRETS` | `true` | Redact common credential patterns in retrieved text (best effort) |
+| `ROCKETCHAT_RETRIEVAL_INCLUDE_FILE_URLS` | `false` | Include attachment URLs in retrieval records |
+| `ROCKETCHAT_RETRIEVAL_INCLUDE_REACTION_IDENTITIES` | `false` | Include usernames behind reactions |
+| `ROCKETCHAT_RETRIEVAL_INCLUDE_USER_IDS` | `false` | Include stable user IDs in sender records |
+| `ROCKETCHAT_AGENT_RESPONSE_MAX_BYTES` | `2097152` | Maximum JSON body per REST response (64 KiB–16 MiB) |
+| `ROCKETCHAT_AGENT_MAX_CONCURRENCY` | `4` | Concurrent agent REST calls |
+| `ROCKETCHAT_AGENT_REQUESTS_PER_MINUTE` | `120` | Per-process budget for agent REST calls |
+
+Boolean values: `1`, `true`, `yes`, `on` enable; anything else disables.
+
+The ten tools live in the `rocketchat_read` and `rocketchat_write` toolsets, which Hermes enables
+for every platform by default. To restrict them, list the toolsets you want under
+`platform_toolsets` in `config.yaml` (e.g. `rocketchat: [hermes-rocketchat, rocketchat_read]`).
+
+## Security defaults
+
+Rocket.Chat authorizes every API call as the bot account, not as the person who asked Hermes to
+act, so the plugin adds its own authorization layer in front of every credentialed action.
+
+- **Inbound.** The gateway's allowlist (or a pairing approval) is checked before the adapter
+  downloads attachments, runs ffmpeg, fetches thread history, forwards a slash command, or writes
+  a topic. Unauthorized senders get a text-only dispatch so Hermes can offer pairing; nothing else
+  happens for them. Republished message documents, system messages, and messages from rooms the
+  bot has not joined never start a turn.
+- **Peer bots.** Messages Rocket.Chat flags as bot-generated are ignored unless they are a
+  `rocketchat_delegate` task envelope. A delegated task may run an agent turn but can never
+  execute a gateway control command (`/restart`, `/update`, `/sethome`, `/model` and friends), and
+  replies into that DM carry a terminal envelope so two agents cannot loop.
+- **Reads.** A retrieval call from a Rocket.Chat conversation may read only that room. A cross-room
+  read needs the room in `ROCKETCHAT_RETRIEVAL_ALLOWED_ROOMS` **and** the requester in
+  `ROCKETCHAT_RETRIEVAL_TRUSTED_USERS`. Thread and permalink calls authorize the room before looking
+  up the opaque message ID, then require the returned `_id` and `rid` to match.
+- **Writes.** Disabled until `ROCKETCHAT_AGENT_WRITE_TOOLS=true`. Posting to the current room is then
+  allowed; creating rooms, opening DMs, resolving names, uploading host files, and any cross-room
+  write need a trusted requester (and, for an existing room, the exact write allowlist).
+- **Host files.** `ROCKETCHAT_AGENT_FILE_UPLOADS=true` plus at least one allowed root are required
+  for `rocketchat_send_file` and for model-emitted `MEDIA:` paths. Paths are opened descriptor by
+  descriptor without following symlinks and are size-bounded.
+- **Network.** HTTPS by default, the token is sent only to the configured origin, API redirects are
+  refused, attachment redirects are followed once without the token, and every response body, DDP
+  frame, media download, thread context, and tool result is bounded.
+- **Profiles.** Settings are read through Hermes' profile-scoped secret reader and one token is
+  locked to one running gateway, so multiplexed profiles never share a bot.
+
+Authorization uses Hermes' task-local session context; process-global `HERMES_SESSION_*` values
+are ignored. Retrieved text is marked untrusted and heuristically redacted, but it can still
+contain prompt injection: keep write tools off for research-only deployments and require human
+review for consequential actions. Use a dedicated bot account with the minimum room memberships,
+never an administrator token.
 
 ## Features
 
-| Feature | Status |
-|---------|--------|
-| DDP WebSocket (inbound) | ✅ `__my_messages__` subscription |
-| REST API (outbound) | ✅ `chat.postMessage` |
-| DM sender identity | ✅ Rocket.Chat display name with username/ID fallbacks |
-| File upload | ✅ Gateway media sends and agent-triggered uploads via `rooms.media` + `rooms.mediaConfirm` |
-| Attachment download | ✅ With image/audio/document cache |
-| Thread support | ✅ Clarifications and follow-ups stay under the channel/group root via `tmid`; DMs stay flat |
-| Mention gating | ✅ Configurable per room |
-| Typing indicator | ✅ Rocket.Chat 8.x compatible |
-| Reconnect | ✅ Exponential backoff (2s–60s) |
-| Voice message → STT | ✅ ffmpeg MP3 conversion pipeline |
-| Emoji reactions | ✅ 👀✅❌ on channel messages |
-| Topic sync | ✅ Bidirectional (Hermes session title ↔ RC room topic) |
-| Slash command routing | ✅ Position-0 only, gated via `is_gateway_known_command()` |
-| Deferred attachments | ✅ File-only uploads merged with next text message |
-| Cron delivery | ✅ Standalone REST-only sender |
-| Setup wizard | ✅ `hermes gateway setup` |
-| Plugin discovery | ✅ Auto-discover via `kind: platform` |
-| Thread context | ✅ First mention in a thread pulls in prior thread messages |
-| Agent tools | ✅ Ten tools for room management, posting, uploads, DMs, one-shot delegation, search, history, threads, and permalinks (see below) |
+| Feature | Notes |
+|---|---|
+| Inbound stream | DDP `__my_messages__`; login result verified, subscription readiness tracked, republished documents filtered, keepalive and reconnect with backoff |
+| Outbound | `chat.postMessage`, `chat.update`, `chat.delete`; UTF-16-aware splitting at 5000 |
+| Threads | Channel and group replies, clarifications and status messages stay under one root in `thread` mode; DMs stay flat; first turn in a thread gets the newest replies as context |
+| Media | Attachment download (including object-storage redirects), voice → MP3 via ffmpeg, uploads through `rooms.media` + `rooms.mediaConfirm`, cron deliveries with attachments |
+| Reactions | 👀 / ✅ / ❌ with idempotent `shouldReact` |
+| Typing indicator | `user-activity` with the identity the workspace expects, thread-aware |
+| Topic sync | Optional, default off, trusted writers only |
+| Slash commands | Hermes commands at position 0; Rocket.Chat-native commands forwarded only when allowlisted |
+| Agent tools | Ten tools, read/write split, see below |
+| Configuration | `.env` or `config.yaml`, profile-scoped, setup wizard |
 
----
+## Agent tools
 
-## Agent Tools
+| Tool | Use it for | Parameters | Bot permission needed |
+|---|---|---|---|
+| `rocketchat_list_channels` | Discover the rooms the session may read | optional `filter`; paginates the server list | `view-c-room`; private groups only where the bot is a member |
+| `rocketchat_search_messages` | Find decisions, incidents, owners inside one room | `room_id`, `query`; `count` 1–100 (25), `offset` | member with read access |
+| `rocketchat_get_history` | Summarize or audit a slice of one room | `room_id`; `count` 1–100 (50), `offset`, `oldest`, `latest`, `inclusive`, `include_threads` | member with read access |
+| `rocketchat_get_thread` | Reconstruct a thread, newest replies first | `tmid`; optional expected `room_id`; `limit` 1–500 (100) | read access to root and room |
+| `rocketchat_get_permalink` | Stable link for a ticket or hand-off | `message_id`; optional expected `room_id` | read access to message and room |
+| `rocketchat_create_channel` | Create a project or incident room | `name`; `private`, `members` | `create-c` / `create-p` |
+| `rocketchat_post` | Deliver a result to another room | `message` plus `channel` or `room_id` | member able to post |
+| `rocketchat_send_file` | Deliver a report or export | `file_path` plus exactly one of `room_id`, `username`, `channel`; `caption`, `file_name`, `tmid` | member able to upload |
+| `rocketchat_dm` | Open a private workflow or a reminder target | `username`; optional `message`; returns the `room_id` | may create DMs |
+| `rocketchat_delegate` | Hand one task to another Hermes agent | `username`, `message`; returns `delegation_id` | may create DMs |
 
-The plugin registers ten Rocket.Chat tools, divided into read and write
-capabilities. `rocketchat_list_channels` and the four retrieval tools are read
-tools. `rocketchat_create_channel`, `rocketchat_post`, `rocketchat_send_file`,
-`rocketchat_dm`, and `rocketchat_delegate` are write tools and fail closed unless
-`ROCKETCHAT_AGENT_WRITE_TOOLS=true`. File upload additionally requires
-`ROCKETCHAT_AGENT_FILE_UPLOADS=true` and an allowed root. Every call is also checked against the
-runtime platform/session policy described under
-[Secure agent-tool defaults](#secure-agent-tool-defaults).
+Combined with the built-in `cronjob` tool: *"remind @zed about the deploy tomorrow at 9, in a
+DM"* opens the DM with `rocketchat_dm` and schedules delivery to `rocketchat:<room_id>`, which
+works even if the gateway restarts in between. Cron deliveries can carry attachments.
 
-| Tool | Business use case | Key parameters and pagination | Bot permission needed |
-|------|-------------------|-------------------------------|-----------------------|
-| `rocketchat_list_channels` | Discover authorized retrieval targets | Optional `filter`; returns only the current room plus cross-room IDs authorized by the room/user policy | `view-c-room` for public channels; private groups only where the bot is a member |
-| `rocketchat_create_channel` | Create a project, incident, or private working room | `name`; optional `private`, `members` | `create-c` / `create-p` |
-| `rocketchat_post` | Publish a result or hand-off to another room | `message` plus `channel` or exact `room_id` | bot must be a room member and able to post |
-| `rocketchat_send_file` | Deliver a report, export, or generated artifact | `file_path` plus exactly one of `room_id`, `username`, `channel`; optional `caption`, `file_name`, `tmid` | bot must be able to post and upload files in the target room |
-| `rocketchat_dm` | Open a private workflow or schedule a direct reminder | `username`; optional `message` | bot must be allowed to create/open DMs with the user |
-| `rocketchat_delegate` | Send one task to another Hermes agent without starting a bot-to-bot reply loop | `username`, `message`; returns a `delegation_id` | bot must be allowed to create/open DMs with the peer agent |
-| `rocketchat_search_messages` | Find decisions, incidents, owners, or prior discussion inside one known room | `room_id`, `query`; `count` defaults to 25 (valid 1–100); `offset` defaults to 0 and must be non-negative | bot must be a room member with access to search/read its messages |
-| `rocketchat_get_history` | Summarize or audit a bounded slice of one room's timeline | `room_id`; `count` defaults to 50 (valid 1–100); `offset` defaults to 0 and must be non-negative; optional `oldest`, `latest`, `inclusive`; `include_threads` defaults to false | bot must be a room member with access to its history |
-| `rocketchat_get_thread` | Reconstruct a discussion before summarizing or acting on it | `tmid`; optional expected `room_id` (required cross-room/contextless); `limit` defaults to 100 (valid 1–500) | bot must be able to read the parent message and its room |
-| `rocketchat_get_permalink` | Produce a stable link for an audit trail, ticket, or hand-off | `message_id`; optional expected `room_id` (required cross-room/contextless) | bot must be able to read the message and room metadata |
+### Loop-safe delegation
 
-Combined with the built-in `cronjob` tool this enables natural flows like:
+Use `rocketchat_delegate`, not `rocketchat_dm`, when the target is another Hermes agent. The tool
+wraps the request in a versioned task envelope; the receiving adapter strips it, runs the task once
+with gateway control disabled, and marks every reply in that DM as a terminal result that the
+sender ignores. Servers that omit bot metadata can list peer bots in `ROCKETCHAT_BOT_PEERS`.
 
-> *"hey, remind @zed about the deploy tomorrow at 9 — in a DM"*
+### Retrieval notes
 
-The agent opens @zed's DM room via `rocketchat_dm` (which returns the `room_id`) and schedules a cron job with `deliver="rocketchat:<room_id>"`, so the reminder lands in the DM even if the gateway restarted in between.
-
-### Loop-safe bot delegation
-
-Use `rocketchat_delegate`, not `rocketchat_dm`, when the target username belongs
-to another Hermes agent. The tool wraps the request in a versioned task envelope.
-The receiving adapter strips the envelope, runs the task once, and marks every
-text, edited, or media response in that DM as a terminal result. Terminal results
-are dropped before agent dispatch, so they cannot produce another reply.
-
-Ordinary messages identified by Rocket.Chat as bot-generated are ignored unless
-they contain a valid delegation task. Rocket.Chat versions that omit bot metadata
-can set `ROCKETCHAT_BOT_PEERS` to the peer bot usernames or IDs. This list
-contains only bot identities; `ROCKETCHAT_ALLOW_ALL_USERS=true` can still keep
-the gateway open to human users.
-
-> *"Ask @halfbrain to update the project note."*
-
-The calling agent uses `rocketchat_delegate`. `@halfbrain` executes the request
-and may post a result in the shared DM, but the calling agent does not treat that
-result as a new instruction.
-
-> *"research this thread and post the summary to #reports"*
-
-Thread context gives the agent the discussion, and `rocketchat_post` delivers the result to a different room than the one the conversation is happening in (Hermes deliberately ships no generic agent-callable `send_message` — cross-room posting on Rocket.Chat goes through this tool).
-
-> *"send `/home/hermes/reports/sprint-28.pdf` to #reports and add the caption 'Sprint 28 report'"*
-
-`rocketchat_send_file` accepts an absolute `file_path` on the machine running Hermes and exactly one target: a channel/private-group name, an exact `room_id`, or a real Rocket.Chat `username` (login, not display name). It can also set a displayed `file_name`, attach a `caption`, and post under a thread root using `tmid`. For DMs it opens or reuses the conversation and rejects an unresolved username before uploading. For scheduled or multi-step workflows, use the literal `room_id` returned by `rocketchat_dm` or `rocketchat_list_channels`; never derive one from a name.
-
-The tool reads a file that is already present on the Hermes host, but only from
-canonical paths below `ROCKETCHAT_AGENT_FILE_ALLOWED_ROOTS`; traversal and
-symlinked paths are rejected. Enable it explicitly with
-`ROCKETCHAT_AGENT_FILE_UPLOADS=true`. A 100 MiB local guard is enabled by
-default through `ROCKETCHAT_AGENT_FILE_MAX_BYTES` (only literal `0` disables
-it), and one file operation runs at a time unless
-`ROCKETCHAT_AGENT_FILE_MAX_CONCURRENCY` is raised. Rocket.Chat and the reverse
-proxy can enforce lower limits.
-
-### Read-only retrieval examples
-
-Search is intentionally scoped to one literal room ID; it is not a workspace-wide
-discovery API:
-
-```json
-{"room_id": "GENERAL", "query": "deployment decision", "count": 25, "offset": 0}
-```
-
-Fetch a bounded history window, optionally including thread replies and using
-Rocket.Chat timestamps for the lower and upper bounds:
-
-```json
-{"room_id": "GENERAL", "count": 50, "offset": 0, "oldest": "2026-07-01T00:00:00.000Z", "latest": "2026-07-21T23:59:59.999Z", "inclusive": true, "include_threads": false}
-```
-
-For public channels, private groups, and DMs, `include_threads` maps to
-Rocket.Chat's `showThreadMessages` option. The plugin always sends the explicit
-boolean because Rocket.Chat's endpoint defaults differ by room type.
-
-Fetch a thread by its root message ID. `rocketchat_get_thread` retrieves the
-parent separately, then returns it with a bounded set of replies in chronological
-order:
-
-```json
-{"tmid": "threadRootMessageId", "limit": 100}
-```
-
-Build a permalink from a message ID without asking the agent to guess a room
-name or type:
-
-```json
-{"message_id": "messageId"}
-```
-
-`rocketchat_get_permalink` resolves the message with `chat.getMessage`, looks up
-its room with `rooms.info`, and URL-encodes every path component. Rocket.Chat
-room type `c` uses `/channel/<room.name>?msg=<message-id>`, type `p` uses
-`/group/<room.name>?msg=<message-id>`, and type `d` uses
-`/direct/<rid>?msg=<message-id>`.
-
-All retrieval tools return compact normalized message records rather than raw
-Rocket.Chat payloads. Each result is identified as untrusted and obeys the
-privacy opt-ins and `ROCKETCHAT_RETRIEVAL_MAX_RESULT_CHARS` budget. Increase
-`offset` to request another search/history page; the server may return fewer
-records than requested. Rocket.Chat releases differ in whether search/history
-responses include total pagination metadata, so `total` is `null` whenever the
-server omits it. Out-of-range counts/limits and negative offsets are rejected
-rather than silently clamped. The plugin also enforces local slicing, bounded
-thread pagination, and a no-progress stop so a misbehaving server cannot turn a
-bounded request into an infinite or oversized result.
+All retrieval tools return compact normalized records marked as untrusted, obey the privacy
+opt-ins and the result budget, and slice locally even if the server ignores `count`. `total` is
+`null` when the server omits it. Out-of-range counts and negative offsets are rejected rather than
+clamped. Search forwards the query verbatim; Rocket.Chat interprets `/regex/` and `from:` /
+`before:` operators server-side.
 
 ### Thread context
 
-When the bot is mentioned in a thread it hasn't participated in yet, it fetches the earlier thread messages (thread parent + replies via `chat.getThreadMessages`) and injects them as context — so "@bot, summarize this thread" just works. Injection happens only on the bot's first turn in the thread; after that the session history carries the conversation. Messages from users not on `ROCKETCHAT_ALLOWED_USERS` are tagged `[unverified]` and framed as background information, not instructions.
-
-In `ROCKETCHAT_REPLY_MODE=thread`, a top-level message that addresses the bot becomes the conversation's thread root immediately. Clarification questions are posted under that root, and follow-up replies in the active Hermes thread do not need another @mention. A message in a different or unknown thread still requires an explicit mention.
-
----
+When the bot is mentioned in a thread it has not participated in, it fetches the thread root and
+the newest replies (up to 30, 20 000 characters) and passes them to the model as channel context,
+separately from the triggering message. Entries are collapsed to one line each and senders the
+gateway would not authorize are tagged `[unverified sender]`. This happens only on the bot's first
+turn in the thread; afterwards the session history carries the conversation.
 
 ## Troubleshooting
 
-| Problem | Fix |
-|---------|-----|
-| `totp-required` | PAT was created without "Ignore Two Factor" — generate a new one with the checkbox checked |
-| "Failed to authenticate" | Verify with: `curl -H "X-Auth-Token: TOKEN" -H "X-User-Id: ID" https://rc/api/v1/me` |
-| Bot doesn't respond | Make sure the bot has been invited to the channel and check `ROCKETCHAT_ALLOWED_USERS` |
-| WebSocket keeps disconnecting | Set `proxy_read_timeout 600s` in nginx; also check your Mongo Replica Set status |
-| Rate-limited (429) | Tune the Rocket.Chat rate limiter for the bot's IP |
-| Unrecognized slash commands on desktop | RC Desktop intercepts unknown `/` commands client-side. Set `Message_AllowUnrecognizedSlashCommand=true` in RC Admin (Settings → Message) or via env: `OVERWRITE_SETTING_Message_AllowUnrecognizedSlashCommand=true` |
-
----
+| Symptom | Cause and fix |
+|---|---|
+| `Rocket.Chat rejected the DDP resume token` in the log, adapter shows a fatal error | The PAT is invalid, revoked, or was created without "Ignore Two Factor". Generate a new one and restart the gateway. |
+| `failed to authenticate` at connect | Verify with `curl -H "X-Auth-Token: TOKEN" -H "X-User-Id: ID" https://rc/api/v1/me`. |
+| Bot ignores a channel | Invite it (`/invite @bot`); a public room it has not joined is ignored by design. Check `ROCKETCHAT_ALLOWED_USERS`. |
+| Bot re-answered an old thread question mid-conversation | Fixed in 1.5.0 (republished documents). Update the plugin. |
+| Attachments never arrive on an S3/GCS workspace | Fixed in 1.5.0. For a private-address object store set `ROCKETCHAT_ALLOW_PRIVATE_FILE_REDIRECTS=true` or enable "Proxy uploads". |
+| `429 Too Many Requests` | Tune the Rocket.Chat rate limiter or exempt the bot's IP. |
+| Desktop client says "invalid command" for `/new` | Enable `Message_AllowUnrecognizedSlashCommand`. |
+| Voice messages are not transcribed | Install `ffmpeg` on the gateway host. |
+| `bot account is already in use by another Hermes profile` | Two gateways or profiles share one token; give each its own bot user. |
+| WebSocket reconnects every minute | Raise the reverse proxy's read timeout (see above). |
 
 ## Verification
 
-Once configured, `hermes status` should show:
-
-```
-Rocket.Chat 🚀 ✓ configured (plugin)
-```
-
-Send a DM to the bot in Rocket.Chat to test the connection end-to-end.
-
----
+`hermes gateway status` lists Rocket.Chat as configured once the three required variables are
+set; after a restart the log shows `DDP logged in` followed by `subscribed to the message
+stream`. Send the bot a DM to confirm the full path.
 
 ## Architecture
 
 ```
-Rocket.Chat ←── REST /api/v1/chat.postMessage ──→ Hermes Agent
-           ←── DDP WebSocket stream-room-messages ──→ (inbound)
+Rocket.Chat ──DDP stream-room-messages──► ddp.py ──task──► inbound.py ──MessageEvent──► Hermes runner
+            ◄──REST /api/v1/*──────────── adapter.py / media.py / tools.py ◄──────────── agent
 ```
 
-- **Auth:** Personal Access Token (works for both REST and DDP)
-- **Room detection:** `rooms.info` + lazy cache
-- **System messages:** Filtered out by the `t` field (join/leave/role changes, etc.)
-- **Desktop note:** RC Desktop/Browser may intercept unknown `/` commands. Mobile clients work out of the box.
-
----
+The full model, including the inbound pipeline, the republish classifier, the DDP state machine,
+the authorization table, and the invariants the tests pin, is in
+[docs/architecture.md](docs/architecture.md). Security policy: [SECURITY.md](SECURITY.md).
 
 ## Development
 
-Tests need a hermes-agent checkout (the adapter imports `gateway.*` at runtime):
-
 ```bash
 git clone https://github.com/NousResearch/hermes-agent
-python -m pip install -e ./hermes-agent pytest pytest-asyncio aiohttp
-HERMES_AGENT_PATH=./hermes-agent python -m pytest tests/ -v
+python -m pip install -e ./hermes-agent pytest pytest-asyncio pytest-timeout ruff
+HERMES_AGENT_PATH=./hermes-agent make test
+make lint
+make doctor   # hermes plugins doctor . --ci
 ```
 
-Installing the checkout is required because importing `gateway.*` also imports
-Hermes' runtime dependencies. `HERMES_AGENT_PATH` only selects the source tree
-and defaults to `../hermes-agent` when unset.
-
----
+The tests use fake aiohttp and DDP doubles and never contact a server. A live smoke test
+against a disposable local workspace (Docker) or your own one is described in
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Credits
 
-- Original Rocket.Chat adapter: [hermes-agent#4637](https://github.com/NousResearch/hermes-agent/pull/4637) by [@meron1122](https://github.com/meron1122) and [hermes-agent#14869](https://github.com/NousResearch/hermes-agent/pull/14869) by @cyb0rgk1tty
-- Extended plugin version (topic sync, slash commands, voice pipeline, reconnect): [hermes-agent#30463](https://github.com/NousResearch/hermes-agent/pull/30463) by [@HearthCore](https://github.com/HearthCore)
-- Agent-callable file uploads: [hermes-plugin-rocketchat#1](https://github.com/HalfbitStudio/hermes-plugin-rocketchat/pull/1) by [@YounesAmalou](https://github.com/YounesAmalou)
+- Original adapter: [hermes-agent#4637](https://github.com/NousResearch/hermes-agent/pull/4637) by
+  [@meron1122](https://github.com/meron1122) and
+  [hermes-agent#14869](https://github.com/NousResearch/hermes-agent/pull/14869) by @cyb0rgk1tty
+- Extended plugin (topic sync, slash commands, voice, reconnect):
+  [hermes-agent#30463](https://github.com/NousResearch/hermes-agent/pull/30463) by
+  [@HearthCore](https://github.com/HearthCore)
+- Agent file uploads: [#1](https://github.com/HalfbitStudio/hermes-plugin-rocketchat/pull/1) by
+  [@YounesAmalou](https://github.com/YounesAmalou)
+- Keepalive fix and the republished-message diagnosis:
+  [#4](https://github.com/HalfbitStudio/hermes-plugin-rocketchat/pull/4),
+  [#5](https://github.com/HalfbitStudio/hermes-plugin-rocketchat/pull/5) by
+  [@immodigit](https://github.com/immodigit)
 
-Published as a standalone repo per the [hermes-agent plugin policy](https://github.com/NousResearch/hermes-agent/blob/main/CONTRIBUTING.md) — third-party integrations ship as external plugins.
-
+Published as a standalone repository per the
+[hermes-agent plugin policy](https://github.com/NousResearch/hermes-agent/blob/main/CONTRIBUTING.md).
 MIT licensed, same as hermes-agent.

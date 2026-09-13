@@ -1,0 +1,84 @@
+# Disposable Rocket.Chat workspace for scripts/smoke_test.py.
+#
+#   LAN_IP=$(ipconfig getifaddr en0) docker compose -f scripts/smoke/compose.yml up -d
+#   python scripts/smoke/bootstrap.py --out /tmp/rc-smoke.env --lan-ip $LAN_IP
+#   python scripts/smoke_test.py --env-file /tmp/rc-smoke.env
+#
+# MinIO plays the S3 backend with "Proxy uploads" off, so /file-upload/ answers
+# with a redirect to a signed URL, which is the path the plugin must follow.
+# MinIO is published on every interface and addressed by the host's LAN IP so
+# that both the Rocket.Chat container and the plugin on the host reach it.
+
+volumes:
+  mongodb_data: {}
+  minio_data: {}
+
+services:
+  rocketchat:
+    image: ${IMAGE:-registry.rocket.chat/rocketchat/rocket.chat}:${RELEASE:-latest}
+    restart: unless-stopped
+    environment:
+      MONGO_URL: mongodb://mongodb:27017/rocketchat?replicaSet=rs0
+      MONGO_OPLOG_URL: mongodb://mongodb:27017/local?replicaSet=rs0
+      ROOT_URL: http://localhost:3000
+      PORT: 3000
+      DEPLOY_METHOD: docker
+      ADMIN_USERNAME: smoke-admin
+      ADMIN_PASS: SmokeAdmin2026!
+      ADMIN_EMAIL: admin@smoke.invalid
+      ADMIN_NAME: Smoke Admin
+      OVERWRITE_SETTING_Show_Setup_Wizard: completed
+      OVERWRITE_SETTING_Message_AllowUnrecognizedSlashCommand: "true"
+      OVERWRITE_SETTING_Accounts_TwoFactorAuthentication_Enabled: "false"
+      OVERWRITE_SETTING_Statistics_reporting: "false"
+      OVERWRITE_SETTING_Register_Server: "false"
+    depends_on:
+      - mongodb
+      - minio
+    ports:
+      - "127.0.0.1:3000:3000"
+
+  mongodb:
+    image: mongodb/mongodb-community-server:${MONGODB_VERSION:-7.0}-ubi8
+    restart: on-failure
+    volumes:
+      - mongodb_data:/data/db
+    environment:
+      MONGODB_REPLICA_SET_NAME: rs0
+      MONGODB_PORT_NUMBER: 27017
+      MONGODB_INITIAL_PRIMARY_HOST: mongodb
+    entrypoint: |
+      bash -c
+        "mongod --replSet $$MONGODB_REPLICA_SET_NAME --bind_ip_all &
+          sleep 2;
+          until mongosh --eval \"db.adminCommand('ping')\"; do
+            echo '=====> Waiting for Mongo...';
+            sleep 1;
+          done;
+          echo \"=====> Initiating ReplSet $$MONGODB_REPLICA_SET_NAME at $$MONGODB_INITIAL_PRIMARY_HOST:$$MONGODB_PORT_NUMBER...\";
+          mongosh --eval \"rs.initiate({_id: '$$MONGODB_REPLICA_SET_NAME', members: [{ _id: 0, host: '$$MONGODB_INITIAL_PRIMARY_HOST:$$MONGODB_PORT_NUMBER' }]})\";
+          echo '=====> Initiating ReplSet done...';
+        wait"
+
+  minio:
+    image: quay.io/minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: smokeminio
+      MINIO_ROOT_PASSWORD: smokeminio2026
+    volumes:
+      - minio_data:/data
+    ports:
+      - "0.0.0.0:9000:9000"
+      - "127.0.0.1:9001:9001"
+
+  minio-init:
+    image: quay.io/minio/mc:latest
+    depends_on:
+      - minio
+    entrypoint: |
+      sh -c "
+        until mc alias set local http://minio:9000 smokeminio smokeminio2026 >/dev/null 2>&1; do sleep 1; done;
+        mc mb -p local/rc-uploads;
+        echo 'bucket ready'"

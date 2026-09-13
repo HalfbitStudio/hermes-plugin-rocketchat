@@ -4,22 +4,22 @@ download, voice→MP3 conversion, and emoji reaction hooks."""
 from __future__ import annotations
 
 import asyncio
-import dataclasses
-import hashlib
 import json
 import logging
-import os
 import re
 import unicodedata
 from pathlib import Path
-from typing import Any, Dict, List
-from urllib.parse import quote
+from typing import Any, Dict, List, Optional
+from urllib.parse import quote, urlsplit
 
 from gateway.platforms.base import MessageEvent, MessageType, ProcessingOutcome
 
 from .helpers import (
     MediaDownloadTooLarge,
     _ROOM_TYPE_MAP,
+    _env_flag,
+    env_get,
+    is_mutation_republish,
     is_valid_server_identifier,
     is_valid_url_path_identifier,
     media_download_max_bytes,
@@ -27,19 +27,20 @@ from .helpers import (
     read_bounded_response_bytes,
     validate_auth_config,
 )
+from .media import _PublicOnlyResolver, _safe_external_media_url
 
 logger = logging.getLogger(__name__)
 
 _THREAD_CONTEXT_DEFAULT_CHARS = 20_000
 _THREAD_CONTEXT_MESSAGE_CHARS = 4_000
 _INBOUND_MESSAGE_MAX_CHARS = 100_000
-_TRUE_VALUES = {"1", "true", "yes", "on"}
+_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 
 
 def _thread_context_budget() -> int:
     try:
         value = int(
-            os.getenv(
+            env_get(
                 "ROCKETCHAT_THREAD_CONTEXT_MAX_CHARS",
                 str(_THREAD_CONTEXT_DEFAULT_CHARS),
             )
@@ -50,7 +51,7 @@ def _thread_context_budget() -> int:
 
 
 def _env_enabled(name: str) -> bool:
-    return os.getenv(name, "").strip().lower() in _TRUE_VALUES
+    return _env_flag(name, default=False)
 
 
 def _trusted_inbound_writer(user_id: Any) -> bool:
@@ -61,7 +62,7 @@ def _trusted_inbound_writer(user_id: Any) -> bool:
         return False
     trusted = {
         item.strip()
-        for item in os.getenv(
+        for item in env_get(
             "ROCKETCHAT_AGENT_WRITE_TRUSTED_USERS", ""
         ).split(",")
         if item.strip() and item.strip() != "*"
@@ -76,7 +77,7 @@ def _native_slash_is_allowed(command: str, user_id: Any) -> bool:
         return False
     allowed = {
         item.strip().lstrip("/").casefold()
-        for item in os.getenv("ROCKETCHAT_FORWARDED_SLASH_COMMANDS", "").split(",")
+        for item in env_get("ROCKETCHAT_FORWARDED_SLASH_COMMANDS", "").split(",")
         if item.strip() and item.strip() != "*"
     }
     return _trusted_inbound_writer(user_id) and bare in allowed
@@ -85,11 +86,12 @@ def _native_slash_is_allowed(command: str, user_id: Any) -> bool:
 def _audit_inbound_write(
     *, action: str, outcome: str, room_id: Any, user_id: Any, command: str = ""
 ) -> None:
-    """Emit a content-free audit record for PAT-powered inbound writes."""
-    def fingerprint(value: Any) -> str:
-        return hashlib.sha256(
-            str(value or "").encode("utf-8", errors="replace")
-        ).hexdigest()[:16]
+    """Emit a content-free audit record for PAT-powered inbound writes.
+
+    Identifiers are hashed with the same keyed fingerprint as the agent-tool
+    audit stream so the two can be correlated in one log query.
+    """
+    from .tools import _audit_hash
 
     logger.info(
         "rocketchat_inbound_write_audit %s",
@@ -97,8 +99,8 @@ def _audit_inbound_write(
             {
                 "action": action,
                 "outcome": outcome,
-                "room_hash": fingerprint(room_id),
-                "user_hash": fingerprint(user_id),
+                "room_hash": _audit_hash(str(room_id or "")),
+                "user_hash": _audit_hash(str(user_id or "")),
                 "command": command.lstrip("/").casefold()[:64],
             },
             sort_keys=True,
@@ -145,8 +147,12 @@ def _sender_display_name(sender: Dict[str, Any]) -> str:
 
 
 def _sender_is_bot_peer(post: Dict[str, Any], sender: Dict[str, Any]) -> bool:
-    """Identify automated peers without requiring a human-user allowlist."""
-    if post.get("bot") is True:
+    """Identify automated peers without requiring a human-user allowlist.
+
+    Rocket.Chat marks integration/app messages with ``bot: true`` or with an
+    object such as ``{"i": "<integrationId>"}``; both count.
+    """
+    if post.get("bot"):
         return True
     sender_type = sender.get("type")
     if isinstance(sender_type, str) and sender_type.casefold() in {"bot", "app"}:
@@ -161,7 +167,7 @@ def _sender_is_bot_peer(post: Dict[str, Any], sender: Dict[str, Any]) -> bool:
     sender_id = sender.get("_id")
     username = sender.get("username")
     username_folded = username.casefold() if isinstance(username, str) else ""
-    for configured in os.getenv("ROCKETCHAT_BOT_PEERS", "").split(","):
+    for configured in env_get("ROCKETCHAT_BOT_PEERS", "").split(","):
         peer = configured.strip()
         if not peer or peer == "*":
             continue
@@ -185,128 +191,98 @@ def _sanitize_inbound_message(value: Any) -> str:
 class InboundMixin:
     """Inbound handling of :class:`~.adapter.RocketchatAdapter`."""
 
-    async def _offer_central_pairing(self, owner: Any, event: MessageEvent) -> None:
-        """Mirror GatewayRunner's rejected-DM pairing branch without dispatching."""
-        source = event.source
-        if source.chat_type != "dm" or source.user_id is None:
-            return
-        behavior = getattr(owner, "_get_unauthorized_dm_behavior", None)
-        pairing_store = getattr(owner, "pairing_store", None)
-        adapters = getattr(owner, "adapters", None)
-        if (
-            not callable(behavior)
-            or pairing_store is None
-            or not isinstance(adapters, dict)
-        ):
-            return
-        try:
-            if behavior(source.platform) != "pair":
-                return
-            platform_name = source.platform.value if source.platform else "unknown"
-            if pairing_store._is_rate_limited(platform_name, source.user_id):
-                return
-            code = pairing_store.generate_code(
-                platform_name, source.user_id, source.user_name or ""
-            )
-            adapter = adapters.get(source.platform)
-            if adapter is None:
-                return
-            if code:
-                await adapter.send(
-                    source.chat_id,
-                    "Hi~ I don't recognize you yet!\n\n"
-                    f"Here's your pairing code: `{code}`\n\n"
-                    "Ask the bot owner to run:\n"
-                    f"`hermes pairing approve {platform_name} {code}`",
-                )
-            else:
-                await adapter.send(
-                    source.chat_id,
-                    "Too many pairing requests right now~ Please try again later!",
-                )
-                pairing_store._record_rate_limit(platform_name, source.user_id)
-        except Exception as exc:
-            logger.error(
-                "Rocket.Chat central pairing preflight failed (%s)",
-                type(exc).__name__,
-            )
+    def _preflight_authorized(self, source: Any) -> Optional[bool]:
+        """Return the gateway's authorization verdict for *source* before side effects.
 
-    async def _admit_inbound_event(
-        self, event: MessageEvent, *, offer_pairing: bool = True
-    ) -> MessageEvent | None:
-        """Run hook + gateway authorization exactly once before adapter effects.
-
-        Current Hermes exposes only one combined private handler that performs
-        pre-dispatch hooks, authorization/pairing, and agent execution.  Calling
-        it as a preflight can race a pairing approval into an unintended agent
-        run.  Instead this adapter invokes the same trusted hook and bound runner
-        checker, handles only the rejected-DM pairing branch, then marks an
-        admitted event internal so the combined handler does not repeat those
-        two admission stages.  ``MessageEvent.internal`` has no other semantics
-        in the supported Hermes runtime.
+        Hermes' runner performs the authoritative admission when the event is
+        dispatched: the ``pre_gateway_dispatch`` hook, the allowlist check, and
+        DM pairing.  This preflight reuses the same allowlist check so the adapter
+        spends no credentials (attachment downloads, ffmpeg, thread history,
+        slash forwarding, topic writes) for a sender the runner will reject.
+        ``None`` means no verdict was available; side effects then stay off and
+        the plain text is still dispatched so the runner can decide.
         """
-        injected_checker = getattr(self, "_inbound_authorization_checker", None)
-        checker = injected_checker
-        handler_owner = getattr(
-            getattr(self, "_message_handler", None), "__self__", None
-        )
+        injected = getattr(self, "_inbound_authorization_checker", None)
+        checker = injected
         if not callable(checker):
-            checker = getattr(handler_owner, "_is_user_authorized", None)
+            owner = getattr(self, "gateway_runner", None)
+            if owner is None:
+                owner = getattr(getattr(self, "_message_handler", None), "__self__", None)
+            checker = getattr(owner, "_is_user_authorized_for_source", None) or getattr(
+                owner, "_is_user_authorized", None
+            )
         if not callable(checker):
-            logger.error("Rocket.Chat inbound admission checker is unavailable")
-            return None
-
-        admitted = event
-        # Unit/integration embedders can inject an authoritative checker.  A
-        # bound GatewayRunner uses its normal pre_gateway_dispatch contract.
-        if not callable(injected_checker):
-            try:
-                from hermes_cli.plugins import invoke_hook
-
-                hook_results = invoke_hook(
-                    "pre_gateway_dispatch",
-                    event=admitted,
-                    gateway=handler_owner,
-                    session_store=getattr(handler_owner, "session_store", None),
-                )
-            except Exception as exc:
-                logger.warning(
-                    "pre_gateway_dispatch invocation failed: %s", exc
-                )
-                hook_results = []
-            for result in hook_results or []:
-                if not isinstance(result, dict):
-                    continue
-                action = result.get("action")
-                if action == "skip":
-                    return None
-                if action == "rewrite":
-                    rewritten = result.get("text")
-                    if isinstance(rewritten, str):
-                        admitted = dataclasses.replace(admitted, text=rewritten)
-                    break
-                if action == "allow":
-                    break
-
-        source = admitted.source
-        if source is None or source.user_id is None:
             return None
         try:
-            authorized = bool(checker(source))
+            return bool(checker(source))
         except Exception as exc:
             logger.error(
-                "Rocket.Chat pre-dispatch authorization failed (%s)",
-                type(exc).__name__,
+                "Rocket.Chat preflight authorization failed (%s)", type(exc).__name__
             )
             return None
-        if not authorized:
-            if offer_pairing and handler_owner is not None:
-                await self._offer_central_pairing(handler_owner, admitted)
-            return None
-        return dataclasses.replace(admitted, internal=True)
 
-    async def _handle_message(self, post: Dict[str, Any]) -> None:
-        """Process an incoming Rocket.Chat message."""
+    def _privileged_hook_verdict(
+        self, source: Any, text: str, post: Dict[str, Any], post_id: str
+    ) -> tuple[str, str]:
+        """Consult ``pre_gateway_dispatch`` before a PAT write that replaces dispatch.
+
+        Slash forwarding and topic writes happen instead of, or before, the
+        runner's own admission, so the hook's skip/rewrite verdict must gate
+        them.  Only these opt-in, trusted-writer paths invoke the hook here; the
+        runner still applies it once to every dispatched event.  Embedders that
+        inject ``_inbound_authorization_checker`` own admission entirely.
+        Returns ``("skip", text)`` or ``("allow", vetted_text)``.
+        """
+        if callable(getattr(self, "_inbound_authorization_checker", None)):
+            return "allow", text
+        owner = getattr(self, "gateway_runner", None)
+        if owner is None:
+            owner = getattr(getattr(self, "_message_handler", None), "__self__", None)
+        try:
+            from hermes_cli.plugins import invoke_hook
+
+            results = invoke_hook(
+                "pre_gateway_dispatch",
+                event=MessageEvent(
+                    text=text,
+                    message_type=MessageType.COMMAND,
+                    source=source,
+                    raw_message=post,
+                    message_id=post_id,
+                ),
+                gateway=owner,
+                session_store=getattr(owner, "session_store", None),
+            )
+        except Exception as exc:
+            logger.warning("pre_gateway_dispatch preflight failed (%s)", type(exc).__name__)
+            return "allow", text
+        for result in results or []:
+            if not isinstance(result, dict):
+                continue
+            action = result.get("action")
+            if action == "skip":
+                return "skip", text
+            if action == "rewrite":
+                rewritten = result.get("text")
+                return "allow", rewritten if isinstance(rewritten, str) else text
+            if action == "allow":
+                break
+        return "allow", text
+
+    @staticmethod
+    def _require_membership() -> bool:
+        """``__my_messages__`` also streams public rooms the bot can read but has not joined."""
+        return _env_flag("ROCKETCHAT_REQUIRE_MEMBERSHIP", default=True)
+
+    async def _handle_message(
+        self, post: Dict[str, Any], room_meta: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """Process an incoming Rocket.Chat message document.
+
+        ``room_meta`` is the second ``stream-room-messages`` argument
+        (``{roomParticipant, roomType, roomName}``), computed server-side for the
+        bot's own subscription; it is preferred over a ``rooms.info`` round trip.
+        """
         if not isinstance(post, dict):
             return
         sender = post.get("u") or {}
@@ -325,6 +301,14 @@ class InboundMixin:
         post_id = post.get("_id", "")
         if not is_valid_server_identifier(post_id):
             return
+
+        # Rocket.Chat resends a message whenever its document changes (thread
+        # counters, reactions, pins, edits).  Such a frame is not a new turn.
+        if is_mutation_republish(post):
+            logger.debug(
+                "Rocket.Chat: ignored republished message document (mutation, not a new post)"
+            )
+            return
         if self._dedup.is_duplicate(post_id):
             return
 
@@ -332,10 +316,25 @@ class InboundMixin:
         if not is_valid_server_identifier(room_id):
             return
 
-        # Look up room type lazily; cache forever.
+        # Server-authoritative room metadata from the stream beats the REST cache.
+        meta = room_meta if isinstance(room_meta, dict) else {}
+        raw_meta_type = meta.get("roomType")
+        meta_type = _ROOM_TYPE_MAP.get(raw_meta_type) if isinstance(raw_meta_type, str) else None
+        if meta_type:
+            self._room_type_cache[room_id] = meta_type
+        if meta.get("roomParticipant") is False and self._require_membership():
+            logger.debug("Rocket.Chat: ignored message from a room the bot has not joined")
+            return
+
         chat_type = self._room_type_cache.get(room_id)
         if chat_type is None:
             chat_type = await self._resolve_room_type(room_id)
+        if chat_type is None:
+            # Guessing "channel" would mention-gate a DM and drop it silently.
+            logger.warning(
+                "Rocket.Chat: dropping a message because the room type could not be determined"
+            )
+            return
 
         # Handle system messages: skip all except topic changes in DMs.
         t_type = post.get("t")
@@ -356,24 +355,22 @@ class InboundMixin:
                         user_name=sender_name,
                         thread_id=None,
                     )
-                    from gateway.platforms.base import resolve_channel_prompt
-                    channel_prompt = resolve_channel_prompt(
-                        self.config.extra, room_id, None,
-                    )
-                    cmd_msg = MessageEvent(
-                        text=f"/title {topic_text}",
-                        message_type=MessageType.COMMAND,
-                        source=source,
-                        raw_message=post,
-                        message_id=post_id,
-                        channel_prompt=channel_prompt,
-                    )
-                    admitted = await self._admit_inbound_event(
-                        cmd_msg, offer_pairing=False
-                    )
-                    if admitted is not None:
+                    if self._preflight_authorized(source) is True:
+                        from gateway.platforms.base import resolve_channel_prompt
+                        channel_prompt = resolve_channel_prompt(
+                            self.config.extra, room_id, None,
+                        )
                         self._last_topic[room_id] = topic_text
-                        await self.handle_message(admitted)
+                        await self.handle_message(
+                            MessageEvent(
+                                text=f"/title {topic_text}",
+                                message_type=MessageType.COMMAND,
+                                source=source,
+                                raw_message=post,
+                                message_id=post_id,
+                                channel_prompt=channel_prompt,
+                            )
+                        )
             return  # All other system messages: skip
 
         raw_message_text = post.get("msg", "")
@@ -389,10 +386,7 @@ class InboundMixin:
             delegation_kind = None
             delegation_id = None
         if delegation_kind == "result":
-            logger.info(
-                "Rocket.Chat: ignored terminal delegation result in room=%s",
-                room_id,
-            )
+            logger.info("Rocket.Chat: ignored terminal delegation result")
             return
         elif delegation_kind == "task":
             if not delegation_body.strip() or delegation_id is None:
@@ -403,6 +397,9 @@ class InboundMixin:
                 "Rocket.Chat: ignored non-delegation message from bot peer"
             )
             return
+        # A delegated task body is data from another agent: it may run a turn but
+        # never a gateway control command (/restart, /update, /sethome, /model...).
+        gateway_control = delegation_kind != "task"
 
         physical_thread_id = post.get("tmid") or None
         if physical_thread_id is not None and not is_valid_server_identifier(
@@ -417,21 +414,19 @@ class InboundMixin:
 
         # Mention gating for non-DM rooms.
         if chat_type != "dm":
-            require_mention = os.getenv(
-                "ROCKETCHAT_REQUIRE_MENTION", "true"
-            ).lower() not in ("false", "0", "no")
+            require_mention = _env_flag("ROCKETCHAT_REQUIRE_MENTION", default=True)
 
-            free_channels_raw = os.getenv("ROCKETCHAT_FREE_RESPONSE_CHANNELS", "")
+            free_channels_raw = env_get("ROCKETCHAT_FREE_RESPONSE_CHANNELS", "")
             free_channels = {ch.strip() for ch in free_channels_raw.split(",") if ch.strip()}
             is_free_channel = room_id in free_channels
 
+            # @all / @here are room broadcasts, not requests to the bot.
             mentions = post.get("mentions") or []
             mention_ids = {m.get("_id") for m in mentions if isinstance(m, dict)}
             mention_names = {m.get("username") for m in mentions if isinstance(m, dict)}
             has_mention = (
                 self._bot_user_id in mention_ids
-                or self._bot_username in mention_names
-                or "all" in mention_ids or "here" in mention_ids
+                or bool(self._bot_username and self._bot_username in mention_names)
             )
             if not has_mention and self._bot_username:
                 pattern = re.compile(
@@ -459,10 +454,7 @@ class InboundMixin:
                 ).strip()
 
         # Some Rocket.Chat versions keep an explicit @bot prefix in DMs.  Strip
-        # it only when the remainder is a real position-zero command, then make
-        # this normalized text the input to the security hook.  After admission
-        # the hook's rewrite is authoritative; raw pre-hook text must never be
-        # resurrected into a privileged command.
+        # it only when the remainder is a real position-zero command.
         if chat_type == "dm" and self._bot_username:
             dm_command_text = re.sub(
                 rf"^@{re.escape(self._bot_username)}(?:\s+|[,:-]\s*)",
@@ -489,10 +481,6 @@ class InboundMixin:
         ):
             thread_id = post_id
 
-        # Admission happens after address/mention gating but before every
-        # PAT-powered write, attachment download, ffmpeg invocation, or thread
-        # history fetch.  The event intentionally contains no downloaded media
-        # and no historical content at this point.
         source = self.build_source(
             chat_id=room_id,
             chat_name=sender_name if chat_type == "dm" else None,
@@ -501,90 +489,93 @@ class InboundMixin:
             user_name=sender_name,
             thread_id=thread_id,
         )
-        admitted = await self._admit_inbound_event(
-            MessageEvent(
-                text=message_text,
-                message_type=(
-                    MessageType.COMMAND
-                    if message_text.startswith("/")
-                    else MessageType.TEXT
-                ),
-                source=source,
-                raw_message=post,
-                message_id=post_id,
+        self._remember_source(room_id, source)
+
+        def _message_type(text: str) -> MessageType:
+            return (
+                MessageType.COMMAND
+                if gateway_control and text.startswith("/")
+                else MessageType.TEXT
             )
-        )
-        if admitted is None:
-            logger.warning("Dropping non-admitted Rocket.Chat message before effects")
+
+        # Preflight happens after address/mention gating and before every
+        # PAT-powered write, attachment download, ffmpeg invocation, or thread
+        # history fetch.  The runner repeats the authoritative admission (hook,
+        # allowlist, pairing) on dispatch.
+        if self._preflight_authorized(source) is not True:
+            await self.handle_message(
+                MessageEvent(
+                    text=message_text,
+                    message_type=_message_type(message_text),
+                    source=source,
+                    raw_message=post,
+                    message_id=post_id,
+                    allow_gateway_control=gateway_control,
+                )
+            )
             return
-        message_text = admitted.text
+
         if delegation_kind == "task" and delegation_id is not None:
             self._remember_delegation_task(room_id, delegation_id)
 
-        # Route RC-native slash commands back to Rocket.Chat.  Only the admitted
-        # (and possibly hook-rewritten) text is authoritative here.
+        # Route RC-native slash commands back to Rocket.Chat.
         #
         # IMPORTANT: we ONLY match "/" at position 0, NOT mid-sentence.
-        # A message like "ich find /status doof" is NOT a slash command —
-        # it's just text that happens to contain "/status".
+        # A message like "ich find /status doof" is NOT a slash command.
         #
-        # For known Hermes gateway commands (like /new, /approve, /dashboard,
-        # /workspace, etc.) we skip the RC commands.run call entirely —
-        # RC doesn't know them and would return 400.  This avoids spurious
-        # "command does not exist" error logs and the unnecessary API round-trip.
-        # Unknown/RC-native commands still get routed to RC first.
+        # Known Hermes gateway commands (/new, /approve, /dashboard, ...) skip
+        # the RC commands.run call entirely; RC does not know them.
         _found_slash_cmd = False
         cmd_full = ""
-        for candidate_text in (message_text,):
-            slash_pos = candidate_text.find("/")
-            if slash_pos == 0:
-                cmd_raw = candidate_text[slash_pos:]
-                cmd_token = cmd_raw.split(None, 1)[0]
-                cmd_params = cmd_raw[len(cmd_token):].strip()
-                
-                _found_slash_cmd = True
-                cmd_full = cmd_raw
-                
-                # Skip RC routing for known Hermes gateway commands.
-                _is_hermes_cmd = False
-                try:
-                    from hermes_cli.commands import is_gateway_known_command
-                    # Strip leading "/" before checking — is_gateway_known_command
-                    # expects the bare name (e.g. "new", not "/new").
-                    bare_cmd = cmd_token.lstrip("/").lower()
-                    _is_hermes_cmd = is_gateway_known_command(bare_cmd)
-                except Exception:
-                    pass  # defensive: if import fails, fall through to RC route
-                
-                if not _is_hermes_cmd:
-                    may_forward = _native_slash_is_allowed(cmd_token, sender_id)
-                    _audit_inbound_write(
-                        action="commands.run",
-                        outcome="allow" if may_forward else "deny",
-                        room_id=room_id,
-                        user_id=sender_id,
-                        command=cmd_token,
-                    )
-                    if may_forward:
-                        rc_payload: Dict[str, Any] = {
-                            "command": cmd_token,
-                            "roomId": room_id,
-                            "params": cmd_params,
-                        }
-                        if physical_thread_id:
-                            rc_payload["tmid"] = physical_thread_id
-                        data = await self._api_post("commands.run", rc_payload)
-                        if data and data.get("success"):
-                            logger.info(
-                                "Rocket.Chat: routed allowlisted command %s to RC",
-                                cmd_token,
-                            )
-                            return  # RC handled it
-                break  # tried one text, fall through to agent
+        if gateway_control and message_text.startswith("/"):
+            cmd_raw = message_text
+            cmd_token = cmd_raw.split(None, 1)[0]
+            cmd_params = cmd_raw[len(cmd_token):].strip()
 
-        # If we found and tried to route a / command, replace message_text
-        # with the extracted command so downstream (coerce_plaintext_gateway_command,
-        # msg_type detection, etc.) sees the cleaned command text.
+            _found_slash_cmd = True
+            cmd_full = cmd_raw
+
+            _is_hermes_cmd = False
+            try:
+                from hermes_cli.commands import is_gateway_known_command
+                # is_gateway_known_command expects the bare name ("new", not "/new").
+                _is_hermes_cmd = is_gateway_known_command(cmd_token.lstrip("/").lower())
+            except Exception:
+                pass  # defensive: if import fails, fall through to RC route
+
+            if not _is_hermes_cmd:
+                may_forward = _native_slash_is_allowed(cmd_token, sender_id)
+                if may_forward:
+                    verdict, vetted = self._privileged_hook_verdict(
+                        source, message_text, post, post_id
+                    )
+                    if verdict == "skip":
+                        logger.info("Rocket.Chat: message skipped by pre_gateway_dispatch")
+                        return
+                    if vetted.strip() != cmd_raw.strip():
+                        # The hook rewrote the command away; nothing is forwarded.
+                        may_forward = False
+                _audit_inbound_write(
+                    action="commands.run",
+                    outcome="allow" if may_forward else "deny",
+                    room_id=room_id,
+                    user_id=sender_id,
+                    command=cmd_token,
+                )
+                if may_forward:
+                    # commands.run looks the command up by its bare name.
+                    rc_payload: Dict[str, Any] = {
+                        "command": cmd_token.lstrip("/"),
+                        "roomId": room_id,
+                        "params": cmd_params,
+                    }
+                    if physical_thread_id:
+                        rc_payload["tmid"] = physical_thread_id
+                    data = await self._api_post("commands.run", rc_payload)
+                    if data and data.get("success"):
+                        logger.info("Rocket.Chat: routed allowlisted command to RC")
+                        return  # RC handled it
+
         if _found_slash_cmd:
             message_text = cmd_full
 
@@ -598,6 +589,15 @@ class InboundMixin:
                 and self._topic_sync_enabled()
                 and _trusted_inbound_writer(sender_id)
             )
+            if may_write_topic:
+                verdict, vetted = self._privileged_hook_verdict(
+                    source, cmd_full, post, post_id
+                )
+                if verdict == "skip":
+                    logger.info("Rocket.Chat: message skipped by pre_gateway_dispatch")
+                    return
+                if vetted.strip() != cmd_full.strip():
+                    may_write_topic = False
             _audit_inbound_write(
                 action="set_topic",
                 outcome="allow" if may_write_topic else "deny",
@@ -617,13 +617,7 @@ class InboundMixin:
                 except Exception:
                     logger.debug("Failed to sync RC topic from /title via %s", _topic_endpoint, exc_info=True)
 
-        msg_type = MessageType.TEXT
-        if message_text.startswith("/"):
-            msg_type = MessageType.COMMAND
-        # Also handle the case where routing found a / but RC didn't know it
-        # (message_text might still contain @mention in DMs)
-        if _found_slash_cmd and msg_type != MessageType.COMMAND:
-            msg_type = MessageType.COMMAND
+        msg_type = _message_type(message_text)
 
         media_urls, media_types = await self._download_attachments(post)
 
@@ -635,22 +629,18 @@ class InboundMixin:
             else:
                 msg_type = MessageType.DOCUMENT
 
-        # First bot turn inside an existing thread: prepend the thread's
-        # prior messages so the agent has the conversation context. The
-        # session guard ensures this happens only once — afterwards the
-        # session history already holds the thread.
+        # First bot turn inside an existing thread: hand the thread's prior
+        # messages to the runner as channel context (kept out of ``text`` so
+        # sender attribution and command detection see only the trigger).
+        thread_context = ""
         if (
             physical_thread_id
             and not _found_slash_cmd
             and not has_active_thread_session
         ):
             thread_context = await self._fetch_thread_context(
-                room_id, physical_thread_id, post_id
+                room_id, physical_thread_id, post_id, chat_type=chat_type
             )
-            if thread_context:
-                message_text = thread_context + message_text
-
-        source = admitted.source
 
         from gateway.platforms.base import resolve_channel_prompt
         channel_prompt = resolve_channel_prompt(
@@ -666,23 +656,28 @@ class InboundMixin:
             media_urls=media_urls if media_urls else None,
             media_types=media_types if media_types else None,
             channel_prompt=channel_prompt,
-            internal=admitted.internal,
+            channel_context=thread_context.rstrip() or None,
+            allow_gateway_control=gateway_control,
         )
 
         await self.handle_message(msg_event)
 
-    async def _resolve_room_type(self, room_id: str) -> str:
-        """Look up a room's type via REST. Defaults to 'channel' on failure."""
+    async def _resolve_room_type(self, room_id: str) -> Optional[str]:
+        """Look up a room's type via REST; ``None`` when it cannot be verified.
+
+        Only a verified type is cached.  Callers must not substitute a default:
+        treating an unknown room as a channel would mention-gate a DM.
+        """
         data = await self._api_get("rooms.info", params={"roomId": room_id})
         room = (data or {}).get("room") or {}
         if not isinstance(room, dict) or room.get("_id") != room_id:
-            return "channel"
+            return None
         raw_type = room.get("t")
         chat_type = _ROOM_TYPE_MAP.get(raw_type)
         if chat_type:
             self._room_type_cache[room_id] = chat_type
             return chat_type
-        return "channel"
+        return None
 
     # ── Thread context ────────────────────────────────────────────────
 
@@ -728,14 +723,20 @@ class InboundMixin:
             return False
 
     async def _fetch_thread_context(
-        self, room_id: str, thread_id: str, current_msg_id: str, limit: int = 30
+        self,
+        room_id: str,
+        thread_id: str,
+        current_msg_id: str,
+        limit: int = 30,
+        chat_type: Optional[str] = None,
     ) -> str:
-        """Fetch prior thread messages formatted as context for the agent.
+        """Fetch the most recent prior thread messages as context for the agent.
 
         Includes the thread parent (fetched separately — chat.getThreadMessages
-        returns only replies), skips the bot's own replies and the triggering
-        message, strips @bot mentions, and tags senders not on the allowlist
-        as [unverified sender]. Returns "" on any failure — never blocks handling.
+        returns only replies), requests the newest replies first, skips the
+        bot's own replies and the triggering message, strips @bot mentions, and
+        tags senders the gateway would not authorize as [unverified sender].
+        Returns "" on any failure — never blocks handling.
         """
         try:
             if not all(
@@ -757,7 +758,11 @@ class InboundMixin:
 
             data = await self._api_get(
                 "chat.getThreadMessages",
-                params={"tmid": thread_id, "count": limit + 1},
+                params={
+                    "tmid": thread_id,
+                    "count": limit + 1,
+                    "sort": json.dumps({"ts": -1}),
+                },
             )
             replies = (data or {}).get("messages") or []
             if not isinstance(replies, list):
@@ -785,12 +790,26 @@ class InboundMixin:
 
             allowed = {
                 u.strip()
-                for u in os.getenv("ROCKETCHAT_ALLOWED_USERS", "").split(",")
+                for u in env_get("ROCKETCHAT_ALLOWED_USERS", "").split(",")
                 if u.strip()
             }
-            allow_all = os.getenv("ROCKETCHAT_ALLOW_ALL_USERS", "").lower() in (
-                "true", "1", "yes",
-            )
+            allow_all = _env_flag("ROCKETCHAT_ALLOW_ALL_USERS", default=False)
+
+            def _sender_verified(user_id: str) -> bool:
+                if not user_id:
+                    return False
+                if user_id == self._bot_user_id:
+                    return True
+                # Prefer the gateway's registered check (pairing approvals,
+                # GATEWAY_ALLOWED_USERS, profile scoping); fall back to the env
+                # allowlist when no check is registered.
+                try:
+                    verdict = self._is_sender_authorized(user_id, chat_type, room_id)
+                except Exception:
+                    verdict = None
+                if verdict is not None:
+                    return verdict
+                return allow_all or user_id in allowed
 
             parts: List[str] = []
             seen_ids: set = set()
@@ -808,9 +827,13 @@ class InboundMixin:
                 is_parent = mid == thread_id
                 if sender_id == self._bot_user_id and not is_parent:
                     continue
-                text = _sanitize_thread_context_value(
-                    msg.get("msg"), _THREAD_CONTEXT_MESSAGE_CHARS
-                ).strip()
+                # Collapse line breaks so an untrusted entry cannot forge an
+                # additional "Name: text" line inside the context block.
+                text = " ".join(
+                    _sanitize_thread_context_value(
+                        msg.get("msg"), _THREAD_CONTEXT_MESSAGE_CHARS
+                    ).split()
+                )
                 if not text:
                     continue
                 if self._bot_username:
@@ -820,13 +843,7 @@ class InboundMixin:
                         text,
                         flags=re.IGNORECASE,
                     ).strip()
-                trust_tag = ""
-                if (
-                    not allow_all
-                    and sender_id != self._bot_user_id
-                    and (not sender_id or sender_id not in allowed)
-                ):
-                    trust_tag = "[unverified sender] "
+                trust_tag = "" if _sender_verified(sender_id) else "[unverified sender] "
                 prefix = "[thread parent] " if is_parent else ""
                 name = _sanitize_thread_context_value(
                     _sender_display_name(sender), 255
@@ -971,17 +988,31 @@ class InboundMixin:
                     timeout=aiohttp.ClientTimeout(total=30),
                     allow_redirects=False,
                 ) as resp:
-                    if resp.status < 200 or resp.status >= 300:
+                    if resp.status in _REDIRECT_STATUSES:
+                        # Object-storage backends (S3, GCS) answer with a signed
+                        # URL unless the workspace proxies uploads.
+                        redirected = await self._download_redirected_file(
+                            resp.headers.get("Location"), remaining_bytes
+                        )
+                        if redirected is None:
+                            logger.warning(
+                                "Rocket.Chat attachment redirect was not followed"
+                            )
+                            continue
+                        file_data, redirected_type = redirected
+                        mime = redirected_type or cand["type"]
+                    elif resp.status < 200 or resp.status >= 300:
                         logger.warning(
                             "Rocket.Chat attachment download rejected with HTTP %s",
                             resp.status,
                         )
                         continue
-                    file_data = await read_bounded_response_bytes(
-                        resp, maximum=remaining_bytes
-                    )
+                    else:
+                        file_data = await read_bounded_response_bytes(
+                            resp, maximum=remaining_bytes
+                        )
+                        mime = resp.content_type or cand["type"]
                     remaining_bytes -= len(file_data)
-                    mime = resp.content_type or cand["type"]
                     ext = Path(cand["name"]).suffix
 
                     from gateway.platforms.base import (
@@ -1020,6 +1051,80 @@ class InboundMixin:
 
         return media_urls, media_types
 
+    async def _download_redirected_file(
+        self, location: Any, maximum: int
+    ) -> Optional[tuple[bytes, str]]:
+        """Follow exactly one ``/file-upload`` redirect from the trusted server.
+
+        The signed URL carries its own authorization, so the PAT headers are
+        never forwarded.  Off-origin targets must be HTTPS and, unless
+        ``ROCKETCHAT_ALLOW_PRIVATE_FILE_REDIRECTS=true`` (LAN object stores),
+        resolve only to public addresses.
+        """
+        import aiohttp
+
+        if not _safe_external_media_url(location):
+            return None
+        target = urlsplit(location)
+        origin = urlsplit(self._base_url)
+        same_origin = (
+            target.scheme.lower() == origin.scheme.lower()
+            and (target.hostname or "").lower() == (origin.hostname or "").lower()
+            and target.port == origin.port
+        )
+        if target.scheme.lower() != "https" and not (
+            same_origin or _env_flag("ROCKETCHAT_ALLOW_INSECURE_HTTP")
+        ):
+            return None
+        allow_private = same_origin or _env_flag("ROCKETCHAT_ALLOW_PRIVATE_FILE_REDIRECTS")
+        if not allow_private:
+            try:
+                from tools.url_safety import is_safe_url
+
+                if not is_safe_url(location):
+                    return None
+            except ImportError:
+                return None
+
+        headers: Dict[str, str] = {}
+        if same_origin:
+            base_url, token, user_id = validate_auth_config(
+                self._base_url, self._token, self._bot_user_id
+            )
+            headers = {"X-Auth-Token": token, "X-User-Id": user_id}
+
+        connector = None
+        resolver = None
+        if not allow_private:
+            resolver = _PublicOnlyResolver(aiohttp.resolver.DefaultResolver())
+            connector = aiohttp.TCPConnector(resolver=resolver, use_dns_cache=False)
+        try:
+            async with aiohttp.ClientSession(
+                connector=connector,
+                timeout=aiohttp.ClientTimeout(total=60),
+                trust_env=False,
+            ) as session:
+                async with session.get(
+                    location, headers=headers, allow_redirects=False
+                ) as resp:
+                    if resp.status < 200 or resp.status >= 300:
+                        logger.warning(
+                            "Rocket.Chat attachment redirect target rejected with HTTP %s",
+                            resp.status,
+                        )
+                        return None
+                    data = await read_bounded_response_bytes(resp, maximum=maximum)
+                    content_type = resp.content_type if isinstance(resp.content_type, str) else ""
+                    return data, content_type
+        finally:
+            if connector is not None and not connector.closed:
+                await connector.close()
+            if resolver is not None:
+                try:
+                    await resolver.close()
+                except Exception:
+                    logger.debug("Rocket.Chat: redirect resolver close failed", exc_info=True)
+
     # ── Audio conversion ──────────────────────────────────────────────
 
     async def _convert_audio_to_mp3(self, src_path: str) -> str | None:
@@ -1040,7 +1145,7 @@ class InboundMixin:
             )
             try:
                 await asyncio.wait_for(proc.communicate(), timeout=30)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.warning("Rocket.Chat: ffmpeg conversion timed out")
                 try:
                     proc.kill()
@@ -1066,30 +1171,32 @@ class InboundMixin:
 
     # ── Reactions ─────────────────────────────────────────────────────
 
-    async def _add_reaction(self, message_id: str, emoji: str) -> bool:
-        """Add an emoji reaction to a Rocket.Chat message.
+    async def _set_reaction(self, message_id: str, emoji: str, should_react: bool) -> bool:
+        """Set or clear the bot's reaction via ``chat.react``.
 
-        Rocket.Chat uses ``POST /api/v1/chat.react``. If the bot already
-        reacted with this emoji, it removes the reaction (toggle).
+        Without ``shouldReact`` the endpoint toggles, so a failed or duplicated
+        call would invert the state and leave 👀 stuck; the explicit flag makes
+        the call idempotent.
         """
+        if not is_valid_server_identifier(message_id):
+            return False
         data = await self._api_post(
             "chat.react",
-            {"messageId": message_id, "emoji": emoji},
+            {"messageId": message_id, "emoji": emoji, "shouldReact": should_react},
         )
         return bool(data and data.get("success"))
 
-    async def _remove_reaction(self, message_id: str, emoji: str) -> bool:
-        """Remove the bot's own emoji reaction from a message.
+    async def _add_reaction(self, message_id: str, emoji: str) -> bool:
+        """Add an emoji reaction to a Rocket.Chat message."""
+        return await self._set_reaction(message_id, emoji, True)
 
-        ``chat.react`` toggles — calling it again removes the reaction.
-        """
-        return await self._add_reaction(message_id, emoji)
+    async def _remove_reaction(self, message_id: str, emoji: str) -> bool:
+        """Remove the bot's own emoji reaction from a message."""
+        return await self._set_reaction(message_id, emoji, False)
 
     def _reactions_enabled(self) -> bool:
         """Check if message reactions are enabled via config/env."""
-        return os.getenv("ROCKETCHAT_REACTIONS", "true").lower() not in {
-            "false", "0", "no",
-        }
+        return _env_flag("ROCKETCHAT_REACTIONS", default=True)
 
     async def on_processing_start(self, event: MessageEvent) -> None:
         """Add an in-progress 👀 reaction when processing begins."""

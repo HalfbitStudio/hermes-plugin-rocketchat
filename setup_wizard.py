@@ -35,9 +35,11 @@ def interactive_setup() -> None:
 
     print()
     print_info("🔑 Authentication")
-    print_info("   Generate a Personal Access Token in your Rocket.Chat profile")
-    print_info("   (My Account → Security → Personal Access Tokens)")
-    print_info("   Make sure 'Ignore Two Factor' is checked.")
+    print_info("   Log in AS THE BOT USER, open the avatar menu → Profile →")
+    print_info("   Personal Access Tokens, and generate a token.")
+    print_info("   Token creation needs the 'create-personal-access-tokens'")
+    print_info("   permission (granted to the 'user' role, not to 'bot').")
+    print_info("   Tick 'Ignore Two Factor Authentication'.")
 
     token = prompt("Personal Access Token", password=True)
     if not token:
