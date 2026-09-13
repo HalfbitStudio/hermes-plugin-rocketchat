@@ -34,6 +34,7 @@ from tools.registry import tool_error, tool_result
 from .helpers import (
     ApiResponseTooLarge,
     build_delegation_envelope,
+    env_get,
     is_valid_url_path_identifier,
     read_bounded_json_response,
     validate_auth_config,
@@ -54,6 +55,8 @@ MAX_FILES = 20
 MAX_REACTIONS = 50
 MAX_THREAD_PAGES = 10
 MAX_NO_PROGRESS_PAGES = 2
+MAX_LIST_PAGES = 10
+RATE_LIMIT_RETRY_MAX_SECONDS = 10.0
 
 _UNTRUSTED = "untrusted_external_data"
 _SECURITY_NOTICE = {
@@ -79,11 +82,11 @@ _OPENAI_KEY_RE = re.compile(r"\bsk-[a-zA-Z0-9_-]{16,}")
 _rate_lock = threading.Lock()
 _rate_state: Dict[str, tuple[float, float]] = {}
 _semaphore_lock = threading.Lock()
-_loop_semaphores: "weakref.WeakKeyDictionary[Any, tuple[int, asyncio.Semaphore]]" = (
+_loop_semaphores: weakref.WeakKeyDictionary[Any, tuple[int, asyncio.Semaphore]] = (
     weakref.WeakKeyDictionary()
 )
 _file_semaphore_lock = threading.Lock()
-_loop_file_semaphores: "weakref.WeakKeyDictionary[Any, tuple[int, asyncio.Semaphore]]" = (
+_loop_file_semaphores: weakref.WeakKeyDictionary[Any, tuple[int, asyncio.Semaphore]] = (
     weakref.WeakKeyDictionary()
 )
 _throttle_outcome: contextvars.ContextVar[str] = contextvars.ContextVar(
@@ -92,7 +95,7 @@ _throttle_outcome: contextvars.ContextVar[str] = contextvars.ContextVar(
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
-    raw = os.getenv(name)
+    raw = env_get(name)
     if raw is None:
         return default
     normalized = raw.strip().lower()
@@ -107,7 +110,7 @@ def _bounded_env_int(
     name: str, *, default: int, minimum: int, maximum: int
 ) -> int:
     try:
-        value = int(os.getenv(name, str(default)))
+        value = int(env_get(name, str(default)))
     except (TypeError, ValueError):
         return default
     return min(maximum, max(minimum, value))
@@ -115,7 +118,7 @@ def _bounded_env_int(
 
 def _max_agent_file_bytes() -> int:
     """Return the local safety limit for agent-triggered uploads; 0 disables it."""
-    raw = os.getenv("ROCKETCHAT_AGENT_FILE_MAX_BYTES", str(DEFAULT_MAX_AGENT_FILE_BYTES))
+    raw = env_get("ROCKETCHAT_AGENT_FILE_MAX_BYTES", str(DEFAULT_MAX_AGENT_FILE_BYTES))
     normalized = raw.strip()
     if normalized == "0":
         return 0
@@ -249,7 +252,7 @@ def _allowed_file_roots() -> tuple[list[tuple[Path, Path]], Optional[str]]:
     symlinks; descriptor-relative opening enforces the boundary again at read
     time to close rename/symlink races.
     """
-    raw = os.getenv("ROCKETCHAT_AGENT_FILE_ALLOWED_ROOTS", "")
+    raw = env_get("ROCKETCHAT_AGENT_FILE_ALLOWED_ROOTS", "")
     if not raw.strip():
         return [], "Agent file upload roots are not configured"
     roots: list[tuple[Path, Path]] = []
@@ -664,7 +667,7 @@ def _secure_tool_result(data: Optional[Dict[str, Any]] = None, **kwargs: Any) ->
 
 
 def _csv_set(name: str) -> set[str]:
-    return {item.strip() for item in os.getenv(name, "").split(",") if item.strip()}
+    return {item.strip() for item in env_get(name, "").split(",") if item.strip()}
 
 
 def _valid_server_identifier(value: Any) -> bool:
@@ -689,8 +692,8 @@ def _get_session_context() -> Dict[str, str]:
     try:
         from gateway import session_context
 
-        variable_map = getattr(session_context, "_VAR_MAP")
-        unset = getattr(session_context, "_UNSET")
+        variable_map = session_context._VAR_MAP
+        unset = session_context._UNSET
         names = {
             "platform": "HERMES_SESSION_PLATFORM",
             "room_id": "HERMES_SESSION_CHAT_ID",
@@ -725,8 +728,8 @@ def _get_session_context() -> Dict[str, str]:
 def _audit_hash(value: str) -> Optional[str]:
     if not value:
         return None
-    salt = os.getenv("ROCKETCHAT_TOKEN", "")
-    return hashlib.sha256(f"{salt}\0{value}".encode("utf-8")).hexdigest()[:16]
+    salt = env_get("ROCKETCHAT_TOKEN", "")
+    return hashlib.sha256(f"{salt}\0{value}".encode()).hexdigest()[:16]
 
 
 def _audit_security_event(
@@ -1001,7 +1004,7 @@ def _authorize_write_scope(
 
 
 def _validate_base_url(raw: Optional[str] = None) -> tuple[Optional[str], Optional[str]]:
-    value = os.getenv("ROCKETCHAT_URL", "") if raw is None else raw
+    value = env_get("ROCKETCHAT_URL", "") if raw is None else raw
     try:
         return validate_server_url(value), None
     except ValueError:
@@ -1012,9 +1015,9 @@ def _api_configuration() -> tuple[Optional[tuple[str, str, str]], Optional[str]]
     try:
         return (
             validate_auth_config(
-                os.getenv("ROCKETCHAT_URL", ""),
-                os.getenv("ROCKETCHAT_TOKEN", ""),
-                os.getenv("ROCKETCHAT_USER_ID", ""),
+                env_get("ROCKETCHAT_URL", ""),
+                env_get("ROCKETCHAT_TOKEN", ""),
+                env_get("ROCKETCHAT_USER_ID", ""),
             ),
             None,
         )
@@ -1146,34 +1149,82 @@ async def _api(
         "X-User-Id": user_id,
         "Content-Type": "application/json",
     }
-    await _acquire_rate_token(base_url)
-    semaphore = _request_semaphore()
     try:
-        async with semaphore:
-            async with aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=30), trust_env=False
-            ) as session:
-                async with session.request(
-                    method,
-                    f"{base_url}/api/v1/{path}",
-                    headers=headers,
-                    params=params,
-                    json=payload,
-                    allow_redirects=False,
-                ) as response:
-                    if response.status < 200 or response.status >= 300:
-                        logger.warning("Rocket.Chat API rejected request with HTTP %s", response.status)
-                        return {"_error": "Rocket.Chat API request was rejected"}
-                    data, response_error = await _bounded_json_response(response)
-                    if response_error or data is None:
-                        return {"_error": response_error or "Rocket.Chat API returned an invalid response"}
-                    if not data.get("success", True):
-                        logger.warning("Rocket.Chat API returned success=false")
-                        return {"_error": "Rocket.Chat API request was rejected"}
-                    return data
+        for attempt in range(2):
+            await _acquire_rate_token(base_url)
+            semaphore = _request_semaphore()
+            async with semaphore:
+                async with aiohttp.ClientSession(
+                    timeout=aiohttp.ClientTimeout(total=30), trust_env=False
+                ) as session:
+                    async with session.request(
+                        method,
+                        f"{base_url}/api/v1/{path}",
+                        headers=headers,
+                        params=params,
+                        json=payload,
+                        allow_redirects=False,
+                    ) as response:
+                        if response.status == 429 and attempt == 0:
+                            delay = _rate_limit_delay(response.headers)
+                            if delay is not None:
+                                logger.warning(
+                                    "Rocket.Chat API rate limited; retrying once in %.1fs", delay
+                                )
+                                await asyncio.sleep(delay)
+                                continue
+                        if response.status < 200 or response.status >= 300:
+                            data, _ = await _bounded_json_response(response)
+                            logger.warning(
+                                "Rocket.Chat API rejected request with HTTP %s%s",
+                                response.status,
+                                _error_type_suffix(data),
+                            )
+                            return {"_error": "Rocket.Chat API request was rejected"}
+                        data, response_error = await _bounded_json_response(response)
+                        if response_error or data is None:
+                            return {"_error": response_error or "Rocket.Chat API returned an invalid response"}
+                        if not data.get("success", True):
+                            logger.warning(
+                                "Rocket.Chat API returned success=false%s", _error_type_suffix(data)
+                            )
+                            return {"_error": "Rocket.Chat API request was rejected"}
+                        return data
+        return {"_error": "Rocket.Chat API request was rejected"}
     except Exception as exc:
         logger.warning("Rocket.Chat API request failed (%s)", type(exc).__name__)
         return {"_error": "Rocket.Chat API request failed"}
+
+
+def _error_type_suffix(data: Any) -> str:
+    """Return " (errorType)" for logs; the message text itself is never logged."""
+    if not isinstance(data, dict):
+        return ""
+    for key in ("errorType", "error"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return f" ({value.strip()[:80]})"
+    return ""
+
+
+def _rate_limit_delay(headers: Any) -> Optional[float]:
+    """Delay before one retry of a 429, from Retry-After or X-RateLimit-Reset (epoch ms)."""
+    try:
+        retry_after = headers.get("Retry-After")
+        if retry_after:
+            return min(RATE_LIMIT_RETRY_MAX_SECONDS, max(0.5, float(retry_after)))
+        reset = headers.get("X-RateLimit-Reset")
+        if reset:
+            reset_value = float(reset)
+            if reset_value > 1e11:  # epoch milliseconds
+                reset_value /= 1000.0
+            delay = reset_value - time.time()
+            if delay <= 0:
+                return 0.5
+            return min(RATE_LIMIT_RETRY_MAX_SECONDS, delay)
+    except (TypeError, ValueError):
+        return None
+    return 1.0
 
 
 def _provenance_error() -> str:
@@ -1272,9 +1323,12 @@ async def handle_get_history(args: dict, **kw: Any) -> str:
         "roomId": room_id,
         "count": count,
         "offset": offset,
-        "inclusive": "true" if inclusive else "false",
         "showThreadMessages": "true" if include_threads else "false",
     }
+    # groups.history evaluates ``inclusive`` with JavaScript truthiness, so the
+    # string "false" would enable it; only ever send the true value.
+    if inclusive:
+        params["inclusive"] = "true"
     if oldest:
         params["oldest"] = oldest
     if latest:
@@ -1361,7 +1415,12 @@ async def handle_get_thread(args: dict, **kw: Any) -> str:
         data = await _api(
             "GET",
             "chat.getThreadMessages",
-            params={"tmid": thread_id, "count": page_size, "offset": page_offset},
+            params={
+                "tmid": thread_id,
+                "count": page_size,
+                "offset": page_offset,
+                "sort": json.dumps({"ts": -1}),
+            },
         )
         if "_error" in data:
             return tool_error("Could not fetch Rocket.Chat thread")
@@ -1500,14 +1559,24 @@ async def handle_list_channels(args: dict, **kw: Any) -> str:
         ("channels.list", "channels", "channel"),
         ("groups.list", "groups", "group"),
     ):
-        data = await _api("GET", path, params={"count": 100})
-        if "_error" in data:
-            errors.append(data["_error"])
-            continue
-        raw_rooms = data.get(key) or []
-        if not isinstance(raw_rooms, list):
-            return tool_error("Rocket.Chat API returned an invalid response")
-        for room in raw_rooms[:100]:
+        raw_rooms: list = []
+        page_offset = 0
+        for _page in range(MAX_LIST_PAGES):
+            data = await _api("GET", path, params={"count": 100, "offset": page_offset})
+            if "_error" in data:
+                errors.append(data["_error"])
+                break
+            page = data.get(key) or []
+            if not isinstance(page, list):
+                return tool_error("Rocket.Chat API returned an invalid response")
+            raw_rooms.extend(page[:100])
+            page_offset += len(page[:100])
+            total = data.get("total")
+            if not page or (isinstance(total, int) and not isinstance(total, bool) and page_offset >= total):
+                break
+            if len(page) < 100 and total is None:
+                break
+        for room in raw_rooms:
             if not isinstance(room, dict) or room.get("_id") not in readable_rooms:
                 continue
             room_id = _safe_optional(room.get("_id"), 255)
@@ -1686,7 +1755,7 @@ def _verified_dm_room(
     normalized_names = [value.casefold() for value in usernames]
     distinct_names = set(normalized_names)
     distinct_ids = set(user_ids)
-    bot_id = os.getenv("ROCKETCHAT_USER_ID", "").strip()
+    bot_id = env_get("ROCKETCHAT_USER_ID", "").strip()
     if (
         not _valid_server_identifier(bot_id)
         or len(distinct_names) != 2
@@ -1730,6 +1799,30 @@ def _verified_named_room(
     ):
         return None, "Rocket.Chat room lookup did not match the requested target"
     return room_id, None
+
+
+async def _open_verified_dm(username: str) -> tuple[Optional[str], Optional[str]]:
+    """Open (or reuse) the DM with *username* and verify it is a two-member room.
+
+    ``im.create`` returns only ``{_id, rid, t, usernames}``; the stored room
+    document (``rooms.info``) carries ``uids`` and ``usersCount`` as well, which
+    is what distinguishes a real DM from the one-member ghost room Rocket.Chat
+    creates for an unknown username.
+    """
+    data = await _api("POST", "im.create", payload={"username": username})
+    if not isinstance(data, dict) or "_error" in data:
+        return None, "Could not open Rocket.Chat DM"
+    created = data.get("room")
+    if not isinstance(created, dict):
+        return None, "Rocket.Chat DM returned an invalid room"
+    created_id = created.get("_id") or created.get("rid")
+    room_doc: Any = created
+    if is_valid_url_path_identifier(created_id):
+        info = await _api("GET", "rooms.info", params={"roomId": created_id})
+        room = info.get("room") if isinstance(info, dict) and "_error" not in info else None
+        if isinstance(room, dict) and room.get("_id") == created_id:
+            room_doc = room
+    return _verified_dm_room(room_doc, username)
 
 
 async def _verify_thread_target(room_id: str, thread_id: str) -> Optional[str]:
@@ -1834,10 +1927,7 @@ async def handle_send_file(args: dict, **kw: Any) -> str:
     if scope_error:
         return tool_error(scope_error)
     if username:
-        data = await _api("POST", "im.create", payload={"username": username})
-        if not isinstance(data, dict) or "_error" in data:
-            return tool_error("Could not open Rocket.Chat DM")
-        room_id, verify_error = _verified_dm_room(data.get("room"), username)
+        room_id, verify_error = await _open_verified_dm(username)
         if verify_error or not room_id:
             return tool_error(
                 verify_error or "Rocket.Chat DM returned an invalid room"
@@ -1990,12 +2080,7 @@ async def _handle_dm_request(
     )
     if error:
         return tool_error(error)
-    data = await _api("POST", "im.create", payload={"username": username})
-    if not isinstance(data, dict):
-        return tool_error("Rocket.Chat DM returned an invalid response")
-    if "_error" in data:
-        return tool_error("Could not open Rocket.Chat DM")
-    room_id, verify_error = _verified_dm_room(data.get("room"), username or "")
+    room_id, verify_error = await _open_verified_dm(username or "")
     if verify_error or not room_id:
         return tool_error(verify_error or "Rocket.Chat DM returned an invalid room")
     if not message:

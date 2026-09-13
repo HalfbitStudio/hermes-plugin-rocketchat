@@ -74,7 +74,7 @@ def _safe_external_media_url(url: Any) -> bool:
         return False
     try:
         parsed = urlsplit(url)
-        parsed.port
+        parsed.port  # noqa: B018 - validates malformed ports eagerly
     except (TypeError, ValueError):
         return False
     return bool(
@@ -147,12 +147,7 @@ class MediaMixin:
                     )
                     return None
                 step1 = await read_bounded_json_response(resp)
-        except (
-            aiohttp.ClientError,
-            asyncio.TimeoutError,
-            TypeError,
-            ValueError,
-        ) as exc:
+        except (TimeoutError, aiohttp.ClientError, TypeError, ValueError) as exc:
             logger.error("RC rooms.media failed (%s)", type(exc).__name__)
             return None
 
@@ -202,6 +197,7 @@ class MediaMixin:
         caption: Optional[str] = None,
         reply_to: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        **kwargs: Any,
     ) -> SendResult:
         """Download an image and upload it as a file attachment."""
         return await self._send_url_as_file(
@@ -215,6 +211,7 @@ class MediaMixin:
         caption: Optional[str] = None,
         reply_to: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        **kwargs: Any,
     ) -> SendResult:
         """Upload a local image file."""
         return await self._send_local_file(
@@ -229,6 +226,7 @@ class MediaMixin:
         file_name: Optional[str] = None,
         reply_to: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        **kwargs: Any,
     ) -> SendResult:
         """Upload a local file as a document."""
         return await self._send_local_file(
@@ -242,6 +240,7 @@ class MediaMixin:
         caption: Optional[str] = None,
         reply_to: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        **kwargs: Any,
     ) -> SendResult:
         """Upload an audio file."""
         return await self._send_local_file(
@@ -255,6 +254,7 @@ class MediaMixin:
         caption: Optional[str] = None,
         reply_to: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        **kwargs: Any,
     ) -> SendResult:
         """Upload a video file."""
         return await self._send_local_file(
@@ -336,7 +336,7 @@ class MediaMixin:
                         return SendResult(
                             success=False, error="Media URL exceeded the download limit"
                         )
-                    except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
+                    except (TimeoutError, aiohttp.ClientError, OSError):
                         if attempt < 2:
                             await asyncio.sleep(1.5 * (attempt + 1))
                             continue
@@ -377,35 +377,44 @@ class MediaMixin:
         file_name: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
-        """Upload a local file via the two-step rooms.media flow."""
+        """Upload a local file via the two-step rooms.media flow.
+
+        Model-emitted ``MEDIA:/path`` directives reach this method after Hermes
+        has cleared the task-local session context, and the destination is by
+        construction the session's own room.  The host-file capability is
+        therefore enforced without a requester scope: the file-upload opt-in,
+        the canonical allowed roots, the descriptor-relative open, and the size
+        guard all still apply.
+        """
         import mimetypes
 
-        # Model-emitted MEDIA:/path directives reach this method outside the
-        # agent-tool registry.  Reapply the exact same host-file capability,
-        # task-local requester scope, secure descriptor walk, and size guard.
         from .tools import (
-            _authorize_write_scope,
+            _audit_security_event,
             _authorized_file_path,
             _file_operation_semaphore,
-            _guard_write_tool,
             _has_unsafe_control,
             _max_agent_file_bytes,
             _read_regular_file,
             file_uploads_enabled,
         )
 
-        guard = _guard_write_tool("rocketchat_gateway_send_file", chat_id)
-        if guard or not file_uploads_enabled():
-            return SendResult(success=False, error="Local file delivery is not authorized")
-        if _authorize_write_scope(
-            "rocketchat_gateway_send_file", privileged=True
-        ) or _authorize_write_scope(
-            "rocketchat_gateway_send_file", room_id=chat_id
-        ):
+        if not is_valid_server_identifier(chat_id) or not file_uploads_enabled():
+            _audit_security_event(
+                tool="rocketchat_gateway_send_file", outcome="deny",
+                platform="rocketchat", scope="file_uploads_disabled", room_id=str(chat_id or ""),
+            )
             return SendResult(success=False, error="Local file delivery is not authorized")
         plan, path_error = _authorized_file_path(file_path)
         if path_error or plan is None:
+            _audit_security_event(
+                tool="rocketchat_gateway_send_file", outcome="deny",
+                platform="rocketchat", scope="path_denied", room_id=chat_id,
+            )
             return SendResult(success=False, error="Local file delivery is not authorized")
+        _audit_security_event(
+            tool="rocketchat_gateway_send_file", outcome="allow",
+            platform="rocketchat", scope="gateway_media_delivery", room_id=chat_id,
+        )
 
         requested_name = Path(file_name).name if file_name else plan.name
         if not requested_name or _has_unsafe_control(requested_name):
