@@ -5,7 +5,7 @@ All notable changes to this plugin are documented here. The format follows
 
 ## [Unreleased]
 
-## [1.5.0] - 2026-09-13
+## [1.5.0] - 2026-09-24
 
 ### Fixed
 
