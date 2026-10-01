@@ -28,6 +28,15 @@ hermes gateway restart
 The installer clones this repository into `~/.hermes/plugins/rocketchat-platform/`. Update with
 `hermes plugins update rocketchat-platform` followed by a gateway restart.
 
+If Hermes disabled the plugin after updating to 1.5.0, update to 1.5.1 or newer and explicitly
+re-enable it before restarting:
+
+```bash
+hermes plugins update rocketchat-platform
+hermes plugins enable rocketchat-platform
+hermes gateway restart
+```
+
 Requirements: Hermes Agent 0.21 or newer, Python 3.11+, a Rocket.Chat 6.x, 7.x or 8.x workspace,
 and `ffmpeg` on the gateway host if voice messages should be transcribed.
 
@@ -312,6 +321,7 @@ turn in the thread; afterwards the session history carries the conversation.
 
 | Symptom | Cause and fix |
 |---|---|
+| Plugin disabled after updating to 1.5.0; Rocket.Chat adapter missing | Fixed in 1.5.1: Ruff configuration no longer makes Hermes treat the plugin as a Python package. Update, run `hermes plugins enable rocketchat-platform`, then restart the gateway. |
 | `Rocket.Chat rejected the DDP resume token` in the log, adapter shows a fatal error | The PAT is invalid, revoked, or was created without "Ignore Two Factor". Generate a new one and restart the gateway. |
 | `failed to authenticate` at connect | Verify with `curl -H "X-Auth-Token: TOKEN" -H "X-User-Id: ID" https://rc/api/v1/me`. |
 | Bot ignores a channel | Invite it (`/invite @bot`); a public room it has not joined is ignored by design. Check `ROCKETCHAT_ALLOWED_USERS`. |

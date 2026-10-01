@@ -16,6 +16,8 @@ integrations into its core tree, so Rocket.Chat work happens here.
 - Behaviour that depends on a Rocket.Chat server quirk gets a comment naming the server file
   or endpoint that causes it, and a test that pins the quirk.
 - Match the existing style: type hints, short docstrings that explain *why*, no dead code.
+- Keep Ruff settings in `ruff.toml`. A root `pyproject.toml` makes Hermes' managed environment
+  treat this directory as a Python package; the plugin is loaded directly, without packaging.
 
 ## Workflow
 

@@ -5,6 +5,18 @@ All notable changes to this plugin are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.5.1] - 2026-10-01
+
+### Fixed
+
+- Move Ruff configuration from `pyproject.toml` to `ruff.toml`. Hermes Agent v0.21.5 treated the
+  configuration-only file as a uv workspace package declaration, failed to build it, and disabled
+  `rocketchat-platform` during managed environment generation. The plugin now remains directly
+  loaded, with the same lint rules and no new dependencies
+  ([#8](https://github.com/HalfbitStudio/hermes-plugin-rocketchat/issues/8)).
+- Add a regression check for the installed plugin's packaging metadata and document updating and
+  re-enabling installations that Hermes already disabled.
+
 ## [1.5.0] - 2026-09-24
 
 ### Fixed
@@ -269,7 +281,8 @@ First standalone release, ported from the hermes-agent pull requests #4637, #148
 - Standalone REST sender for cron delivery, `hermes gateway setup` wizard,
   `ROCKETCHAT_SUPPRESS_HOME_CHANNEL_NOTICE`.
 
-[Unreleased]: https://github.com/HalfbitStudio/hermes-plugin-rocketchat/compare/v1.5.0...HEAD
+[Unreleased]: https://github.com/HalfbitStudio/hermes-plugin-rocketchat/compare/v1.5.1...HEAD
+[1.5.1]: https://github.com/HalfbitStudio/hermes-plugin-rocketchat/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/HalfbitStudio/hermes-plugin-rocketchat/compare/v1.4.0...v1.5.0
 [1.4.1]: https://github.com/HalfbitStudio/hermes-plugin-rocketchat/compare/v1.4.0...989a04c
 [1.4.0]: https://github.com/HalfbitStudio/hermes-plugin-rocketchat/compare/v1.3.0...v1.4.0

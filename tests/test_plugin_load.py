@@ -58,3 +58,10 @@ def test_registration_through_real_loader(hermes_home):
     if entry is not None:
         assert entry.apply_yaml_config_fn is not None
         assert entry.standalone_sender_fn is not None
+
+
+def test_installed_plugin_does_not_declare_a_workspace_package(hermes_home):
+    # Hermes' managed environment treats any non-generated pyproject.toml as a package
+    # declaration, even if it contains only tool settings. Pin the installed layout (#8).
+    plugin_dir = hermes_home / "plugins" / "rocketchat-platform"
+    assert not (plugin_dir / "pyproject.toml").exists()
