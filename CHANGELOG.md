@@ -16,6 +16,9 @@ All notable changes to this plugin are documented here. The format follows
   ([#8](https://github.com/HalfbitStudio/hermes-plugin-rocketchat/issues/8)).
 - Add a regression check for the installed plugin's packaging metadata and document updating and
   re-enabling installations that Hermes already disabled.
+- Run CI against the stable Hermes v2026.9.24 release: the moving upstream `main` now installs
+  runtime dependencies only on Python 3.14, breaking the plugin's Python 3.11–3.13 test jobs.
+  Invoke plugin doctor through the `hermes` CLI entry point.
 
 ## [1.5.0] - 2026-09-24
 
