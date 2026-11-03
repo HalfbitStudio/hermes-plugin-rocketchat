@@ -723,6 +723,89 @@ def _apply_yaml_config(yaml_cfg: dict, rocketchat_cfg: dict) -> Optional[dict]:
     return seeded or None
 
 
+# ─── Outbound table formatting ────────────────────────────────────────────────
+# Rocket.Chat's Markdown renderer has no GFM table syntax: a pipe table reaches the
+# client as literal "| a | b |" text, which reads as garbage.  Discord/Telegram/Signal
+# solving the same problem in Hermes core is the precedent; the Rocket.Chat plugin does
+# not inherit it, so both of its send paths call format_tables_as_code().
+_TABLE_WIDTH = 76
+_FENCED_REGION_RE = re.compile(r"(```.*?```)", re.DOTALL)
+
+# Core helpers are imported lazily: this module must stay importable without the Hermes
+# runtime (check_requirements() is a passive probe), and the conversion only matters at
+# send time anyway.
+_TABLE_HELPERS: Optional[tuple] = None
+
+
+def _table_helpers() -> tuple:
+    """Return ``(is_table_divider, realign_markdown_tables, convert_table_to_bullets)``."""
+    global _TABLE_HELPERS
+    if _TABLE_HELPERS is None:
+        from agent.markdown_tables import is_table_divider, realign_markdown_tables
+        from gateway.platforms.helpers import convert_table_to_bullets
+
+        _TABLE_HELPERS = (is_table_divider, realign_markdown_tables, convert_table_to_bullets)
+    return _TABLE_HELPERS
+
+
+def _table_as_bullets(block: str) -> str:
+    """Render a too-wide table as bold headings + bullet groups.
+
+    ``convert_table_to_bullets`` wraps the heading cell in ``**`` unconditionally, so a
+    cell that is already bold ends up as ``****45 dias****`` — collapse that back.
+    """
+    _, _, convert_table_to_bullets = _table_helpers()
+    rendered = convert_table_to_bullets(block)
+    rendered = re.sub(r"\*{4,}", "**", rendered)
+    return re.sub(r"(?<!\w)_{4,}(?!\w)", "__", rendered)
+
+
+def _render_unfenced_tables(text: str) -> str:
+    """Convert every GFM table in *text* into something the client can render."""
+    if "|" not in text:
+        return text
+    is_table_divider, realign_markdown_tables, _ = _table_helpers()
+    lines, out = text.split("\n"), []
+    i, n = 0, len(lines)
+    while i < n:
+        # Same block rule as realign_markdown_tables(): header row, divider, pipe rows.
+        if "|" in lines[i] and i + 1 < n and is_table_divider(lines[i + 1]):
+            j = i + 2
+            while j < n and "|" in lines[j] and lines[j].strip():
+                j += 1
+            block = "\n".join(lines[i:j])
+            aligned = realign_markdown_tables(block, _TABLE_WIDTH)
+            if "|" in aligned:
+                # Fits the budget: keep the grid, in a monospace block.
+                out += ["```", aligned, "```"]
+            else:
+                # Too wide: realign fell back to vertical key/value lines, which reads
+                # worse than native bold headings + bullets.
+                out.append(_table_as_bullets(block))
+            i = j
+            continue
+        out.append(lines[i])
+        i += 1
+    return "\n".join(out)
+
+
+def format_tables_as_code(text: str) -> str:
+    """Rewrite GFM pipe tables for a client without table syntax.
+
+    Tables that fit the width budget become fenced monospace blocks (the client renders
+    those); wider ones become bold headings + bullets.  Regions already inside a code
+    fence are returned byte-for-byte: a pipe table inside a fence is code the user asked
+    to keep verbatim.
+    """
+    if not text or "|" not in text:
+        return text
+    parts = _FENCED_REGION_RE.split(text)
+    return "".join(
+        part if idx % 2 else _render_unfenced_tables(part)
+        for idx, part in enumerate(parts)
+    )
+
+
 async def _standalone_send(
     pconfig,
     chat_id: str,
@@ -759,6 +842,10 @@ async def _standalone_send(
     files = [str(item) for item in (media_files or []) if isinstance(item, (str, Path)) and str(item)]
     if not message.strip() and not files:
         return {"error": "Rocket.Chat standalone send has nothing to deliver"}
+
+    # The live adapter applies this in format_message(); cron delivery and
+    # `hermes send` come through here instead, and need the same conversion.
+    message = format_tables_as_code(message)
 
     headers = {"X-Auth-Token": token, "X-User-Id": user_id}
     json_headers = {**headers, "Content-Type": "application/json"}

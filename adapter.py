@@ -27,6 +27,7 @@ from .helpers import (
     _env_flag,
     build_delegation_envelope,
     env_get,
+    format_tables_as_code,
     is_valid_server_identifier,
     read_bounded_json_response,
     validate_auth_config,
@@ -45,6 +46,11 @@ _HERMES_HOME_CHANNEL_NOTICE = (
 )
 _MAX_ACTIVE_DELEGATION_ROOMS = 256
 _MAX_REMEMBERED_SOURCES = 512
+
+# Rocket.Chat's Markdown renderer has no GFM table syntax: a pipe table reaches the
+# client as literal "| a | b |" text, which reads as garbage. The conversion lives in
+# helpers.format_tables_as_code() and is applied by both send paths (adapter's
+# format_message() and the standalone cron/`hermes send` sender).
 
 
 class RocketchatAdapter(
@@ -745,6 +751,11 @@ class RocketchatAdapter(
         [[audio_as_voice]], [[image]], [[file]]) — the gateway already
         delivers media via send_voice/send_image/send_document methods,
         and these tokens must not reach the Rocket.Chat API as text.
+
+        Finally, rewrite GFM pipe tables: the client's Markdown renderer has
+        no table syntax and shows them as literal "| a | b |" text.  Tables
+        that fit become monospace blocks, wider ones become bullets (see
+        format_tables_as_code).
         """
         # Strip image markdown: ![alt](url) → url
         content = re.sub(r"!\[([^\]]*)\]\(([^)]+)\)", r"\2", content)
@@ -758,4 +769,4 @@ class RocketchatAdapter(
         content = re.sub(r"(?m)^[ \t]*MEDIA:[ \t]*\S.*(?:\n|$)", "", content)
         # Also strip orphan MEDIA: references not at line start
         content = re.sub(r"\s*MEDIA:\S+\s*", " ", content)
-        return content.strip()
+        return format_tables_as_code(content.strip())

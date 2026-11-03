@@ -5,6 +5,14 @@ All notable changes to this plugin are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Markdown tables are rendered for a client that has no table syntax. Rocket.Chat showed a
+  pipe table as literal `| a | b |` text; tables now become fenced monospace blocks
+  (re-aligned) or, when too wide, bold headings with bullets. `format_tables_as_code()` is
+  applied by both send paths: `RocketchatAdapter.format_message()` and the standalone
+  cron/`hermes send` sender, which does not pass through the adapter.
+
 ## [1.5.1] - 2026-10-01
 
 ### Fixed

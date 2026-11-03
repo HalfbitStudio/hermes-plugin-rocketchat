@@ -469,6 +469,53 @@ class TestFormatMessage:
         assert self.adapter.format_message("just text") == "just text"
 
 
+class TestTableFormatting:
+    """Rocket.Chat has no GFM table syntax: tables must be rewritten before posting."""
+
+    NARROW = "| Command | Horario |\n|---|---|\n| orderItem:delete | 05:00 |\n"
+    WIDE = (
+        "| Quando | O que acontece |\n|---|---|\n"
+        "| 5o dia util | Suspensao do servico (`orderItem:suspend`); para de olhar depois de 90 dias |\n"
+    )
+
+    def setup_method(self):
+        self.adapter = _make_adapter()
+
+    def test_narrow_table_becomes_monospace_block(self):
+        result = self.adapter.format_message(self.NARROW)
+        assert result.startswith("```\n") and result.endswith("```")
+        assert "| Command" in result and "| orderItem:delete |" in result
+
+    def test_wide_table_becomes_bullets(self):
+        result = self.adapter.format_message(self.WIDE)
+        assert "```" not in result
+        assert "|" not in result
+        assert "**5o dia util**" in result
+        assert "\u2022 O que acontece: Suspensao do servico" in result
+
+    def test_already_bold_cell_is_not_double_bolded(self):
+        wide = (
+            "| Quando | O que acontece |\n|---|---|\n"
+            "| **45 dias** | E aberto o cancelamento por inadimplencia, mas sem confirmacao, "
+            "nada sai ainda |\n"
+        )
+        result = self.adapter.format_message(wide)
+        assert "****" not in result
+        assert "**45 dias**" in result
+
+    def test_table_inside_fence_is_left_untouched(self):
+        source = "texto\n\n```\n| a | b |\n|---|---|\n| 1 | 2 |\n```\n\nfim"
+        assert self.adapter.format_message(source) == source
+
+    def test_prose_containing_a_pipe_is_unchanged(self):
+        source = "linha com | pipe no meio do texto\noutra linha"
+        assert self.adapter.format_message(source) == source
+
+    def test_conversion_is_idempotent(self):
+        once = self.adapter.format_message(self.NARROW)
+        assert self.adapter.format_message(once) == once
+
+
 # ---------------------------------------------------------------------------
 # Reactions
 # ---------------------------------------------------------------------------

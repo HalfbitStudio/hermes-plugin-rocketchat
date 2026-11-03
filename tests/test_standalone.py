@@ -87,6 +87,27 @@ async def test_long_text_is_chunked_in_utf16_units(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_text_tables_are_converted_before_posting(monkeypatch):
+    """Cron delivery must not post raw pipe tables: Rocket.Chat renders none."""
+    session = FakeSession(
+        {
+            "chat.postMessage": FakeResponse(
+                200, {"success": True, "message": {"_id": "m1", "rid": "GENERAL"}}
+            )
+        }
+    )
+    import aiohttp
+
+    monkeypatch.setattr(aiohttp, "ClientSession", lambda *a, **k: session)
+    table = "| Command | Horario |\n|---|---|\n| orderItem:delete | 05:00 |\n"
+    result = await helpers._standalone_send(_pconfig(), "GENERAL", table)
+    assert result["success"] is True
+    sent = session.calls[0]["json"]["text"]
+    assert sent.startswith("```")
+    assert "| orderItem:delete |" in sent
+
+
+@pytest.mark.asyncio
 async def test_nothing_to_deliver_is_an_error():
     result = await helpers._standalone_send(_pconfig(), "GENERAL", "   ")
     assert "error" in result
