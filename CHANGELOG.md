@@ -5,6 +5,8 @@ All notable changes to this plugin are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.5.2] - 2026-11-03
+
 ### Fixed
 
 - Markdown tables are rendered for a client that has no table syntax. Rocket.Chat showed a
@@ -292,7 +294,8 @@ First standalone release, ported from the hermes-agent pull requests #4637, #148
 - Standalone REST sender for cron delivery, `hermes gateway setup` wizard,
   `ROCKETCHAT_SUPPRESS_HOME_CHANNEL_NOTICE`.
 
-[Unreleased]: https://github.com/HalfbitStudio/hermes-plugin-rocketchat/compare/v1.5.1...HEAD
+[Unreleased]: https://github.com/HalfbitStudio/hermes-plugin-rocketchat/compare/v1.5.2...HEAD
+[1.5.2]: https://github.com/HalfbitStudio/hermes-plugin-rocketchat/compare/v1.5.1...v1.5.2
 [1.5.1]: https://github.com/HalfbitStudio/hermes-plugin-rocketchat/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/HalfbitStudio/hermes-plugin-rocketchat/compare/v1.4.0...v1.5.0
 [1.4.1]: https://github.com/HalfbitStudio/hermes-plugin-rocketchat/compare/v1.4.0...989a04c
